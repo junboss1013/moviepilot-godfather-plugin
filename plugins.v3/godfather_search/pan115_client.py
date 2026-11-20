@@ -51,7 +51,12 @@ class Pan115Client:
                 timeout=self.timeout,
             )
             data = resp.json()
-            if data.get("state") and data.get("data", {}).get("user_id"):
+            # user/info 的 data 可能是字典（含 user_id）或字符串（脱敏手机号）
+            info = data.get("data")
+            if data.get("state") and (
+                (isinstance(info, dict) and (info.get("user_id") or info.get("user_name")))
+                or (isinstance(info, str) and info.strip())
+            ):
                 return True, "115 Cookie 有效"
             # 部分接口 user/info 不可用，用文件列表兜底判断
             resp2 = self.session.get(
