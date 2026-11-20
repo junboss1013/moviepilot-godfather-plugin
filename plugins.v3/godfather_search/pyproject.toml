@@ -1,0 +1,10 @@
+[project]
+name = "godfather-search"
+version = "3.0.0"
+description = "教父资源转存插件：115 优先转存 + 磁力画质/做种排序离线下载"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "requests>=2.31",
+    "playwright>=1.44",
+]
