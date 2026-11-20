@@ -85,7 +85,7 @@ playwright install chromium   # 如需浏览器自动验证 PoW
 
 ### 常见问题：浏览器报 `Executable doesn't exist` / `chrome-headless-shell`
 
-搜索时若报 `BrowserType.launch: Executable doesn't exist at ...chromium_headless_shell...`，说明 **Playwright 库装了但浏览器二进制没下载全**（MoviePilot 官方镜像常见）。插件 v3.2.1 起已内置多策略自动回退（完整 Chromium → 系统 Chrome → 无头版），多数情况会自动绕过；若仍失败，请进容器手动补装：
+搜索时若报 `BrowserType.launch: Executable doesn't exist at ...chromium_headless_shell...`，说明 **Playwright 库装了但浏览器二进制没下载全**（MoviePilot 官方镜像常见）。插件 **v3.2.3 起会在浏览器缺失时自动下载安装并重试**（首次约需 1-2 分钟，稍后重发片名即可）；若自动安装也失败，再进容器手动补装：
 
 ```bash
 # 进入 MoviePilot 容器（容器名按实际替换）
@@ -184,6 +184,7 @@ python -m playwright install chromium-headless-shell
 
 ## 七、版本
 
+- **v3.2.3 / v1.2.3**：浏览器二进制完全缺失时，插件自动调用 `playwright install` 下载无头浏览器并重试启动（已模拟缺失环境端到端验证）；仍失败时报错附手动安装命令。
 - **v3.2.2 / v1.2.2**：修复做种数为 -1（站点未知值）时排序报 `math.log10 domain error` 导致搜索崩溃的问题；已在真实 MoviePilot v3.2.9 实例联动验证（解析 129 条资源、浏览器自动登录正常）。
 - **v3.2.1 / v1.2.1**：修复浏览器启动报错 `Executable doesn't exist ...chrome-headless-shell`——内置多策略自动回退（完整 Chromium channel → 系统 Chrome 路径 → 默认无头版），并把安装命令写进报错提示。
 - **v3.2.0 / v1.2.0**：教父站登录方式改为**填写账号 + 密码自动登录**（内置浏览器填表提交 `/user/login`，字段 `username`/`password`），无需再手动复制 Cookie；保留 Cookie 直填作为兼容回退；已用真实账号端到端验证（自动登录 + 解析 128 条资源）。
