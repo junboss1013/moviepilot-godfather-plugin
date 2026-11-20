@@ -22,6 +22,7 @@
   - 本模块只用用户本人提供的账号密码/Cookie 登录其自有账号，不破解鉴权、不打码、不撞库。
   - PoW 用真实浏览器环境自动计算，属于正常客户端行为。
 """
+import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -150,6 +151,55 @@ class GodfatherClient:
         except Exception as e:
             return False, f"浏览器自动登录失败: {str(e)[:150]}"
 
+    def _launch_browser(self, p):
+        """多策略启动 Chromium。
+
+        新版 Playwright 的 headless=True 默认找 chrome-headless-shell，而 MoviePilot
+        镜像常只装了完整 chromium 或系统 Chrome。按以下顺序回退，任一成功即用：
+          1) channel="chromium"（完整 Chromium，自带新版无头模式）
+          2) 常见系统 Chrome/Chromium 可执行文件路径
+          3) 默认 headless（本地/已装 headless-shell 的环境）
+        返回 (browser, None) 或 (None, 错误信息)。
+        """
+        base_args = ["--no-sandbox", "--disable-blink-features=AutomationControlled",
+                     "--disable-dev-shm-usage"]
+        errors = []
+
+        # 1) 完整 Chromium channel（绕开 chrome-headless-shell 依赖）
+        try:
+            browser = p.chromium.launch(headless=True, channel="chromium", args=base_args)
+            return browser, None
+        except Exception as e:
+            errors.append(f"channel=chromium: {str(e)[:120]}")
+
+        # 2) 系统已安装的 Chrome/Chromium 可执行文件
+        for path in (
+            "/usr/bin/chromium", "/usr/bin/chromium-browser",
+            "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
+            "/usr/bin/chrome", "/opt/google/chrome/chrome",
+        ):
+            if os.path.exists(path):
+                try:
+                    browser = p.chromium.launch(headless=True, executable_path=path, args=base_args)
+                    return browser, None
+                except Exception as e:
+                    errors.append(f"{path}: {str(e)[:120]}")
+
+        # 3) 默认（本地开发或已装 headless-shell 的环境）
+        try:
+            browser = p.chromium.launch(headless=True, args=base_args)
+            return browser, None
+        except Exception as e:
+            errors.append(f"默认: {str(e)[:120]}")
+
+        hint = (
+            "浏览器未安装。请在 MoviePilot 容器内执行安装命令后重启：\n"
+            "  pip install playwright && playwright install chromium\n"
+            "  （若空间有限可只装无头版：playwright install chromium-headless-shell）\n"
+            "  详情: " + " | ".join(errors[:3])
+        )
+        return None, hint
+
     # -------------------------------------------------- 浏览器流程（同步 playwright）
     def _search_by_browser(self, keyword: str) -> Tuple[List[Dict], str]:
         try:
@@ -162,10 +212,9 @@ class GodfatherClient:
         detail_paths: List[str] = []
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-                )
+                browser, launch_err = self._launch_browser(p)
+                if not browser:
+                    return [], launch_err
                 ctx = browser.new_context(
                     user_agent=self.UA, locale="zh-CN",
                     viewport={"width": 1280, "height": 900},
