@@ -83,6 +83,28 @@ pip install beautifulsoup4 requests playwright
 playwright install chromium   # 如需浏览器自动验证 PoW
 ```
 
+### 常见问题：浏览器报 `Executable doesn't exist` / `chrome-headless-shell`
+
+搜索时若报 `BrowserType.launch: Executable doesn't exist at ...chromium_headless_shell...`，说明 **Playwright 库装了但浏览器二进制没下载全**（MoviePilot 官方镜像常见）。插件 v3.2.1 起已内置多策略自动回退（完整 Chromium → 系统 Chrome → 无头版），多数情况会自动绕过；若仍失败，请进容器手动补装：
+
+```bash
+# 进入 MoviePilot 容器（容器名按实际替换）
+docker exec -it moviepilot bash
+
+# 安装完整 Chromium（推荐，一次到位）
+playwright install chromium
+
+# 若提示 playwright 命令不存在，用 python 模块方式：
+python -m playwright install chromium
+
+# 空间有限时，也可只装无头版：
+python -m playwright install chromium-headless-shell
+```
+
+装完 **重启 MoviePilot** 再试。若容器里的 playwright 由插件自动安装在独立 venv，需在该 venv 环境下执行上述命令（可先 `which python` 确认）。
+
+> 插件会在报错消息里直接附上这些安装命令，按提示操作即可。
+
 ---
 
 ## 三、配置（插件设置页）
@@ -162,6 +184,7 @@ playwright install chromium   # 如需浏览器自动验证 PoW
 
 ## 七、版本
 
+- **v3.2.1 / v1.2.1**：修复浏览器启动报错 `Executable doesn't exist ...chrome-headless-shell`——内置多策略自动回退（完整 Chromium channel → 系统 Chrome 路径 → 默认无头版），并把安装命令写进报错提示。
 - **v3.2.0 / v1.2.0**：教父站登录方式改为**填写账号 + 密码自动登录**（内置浏览器填表提交 `/user/login`，字段 `username`/`password`），无需再手动复制 Cookie；保留 Cookie 直填作为兼容回退；已用真实账号端到端验证（自动登录 + 解析 128 条资源）。
 - **v3.1.0 / v1.1.0**：实测适配真实站点结构——详情页 `/res/downurl` JSON 列式解析、画质代码映射、做种加权排序、115 离线下载闭环；修复 PoW 等待超时与 Cookie 注入卡死问题；已端到端验证。
 - **v3.0.0 / v1.0.0**：初始版本（基于早期假设的搜索页直链解析，实际站点结构不同）。
