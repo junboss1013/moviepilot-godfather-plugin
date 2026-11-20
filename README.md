@@ -23,7 +23,7 @@ godfather_search/                      ← 仓库根目录（作为插件源）
 ├── plugins.v3/                        ← MoviePilot V3（3.x）用
 │   └── godfather_search/
 │       ├── __init__.py                ← 主类：V3 SDK 优先、V2 旧路径回退
-│       ├── godfather_client.py        ← 教父站搜索（Cookie + PoW）
+│       ├── godfather_client.py        ← 教父站搜索（账号密码自动登录 + PoW）
 │       ├── pan115_client.py           ← 115：分享转存 + 磁力离线下载
 │       ├── resource_parser.py         ← 资源解析 + 画质/做种识别 + 加权排序
 │       ├── pyproject.toml             ← V3 依赖清单
@@ -48,7 +48,7 @@ godfather_search/                      ← 仓库根目录（作为插件源）
    ```
    多个地址用英文逗号 `,` 分隔。
 4. 点击**同步插件源**，在插件市场搜索「教父资源转存」→ 安装。
-5. 进入插件详情，按下方「配置」填写 Cookie，打开启用开关。
+5. 进入插件详情，按下方「配置」填写**教父站账号 + 密码**与 115 Cookie，打开启用开关。
 
 > 也可以用环境变量 `PLUGIN_MARKET=https://github.com/你的用户名/你的仓库名` 配置后重启容器。
 
@@ -91,7 +91,8 @@ playwright install chromium   # 如需浏览器自动验证 PoW
 | --- | --- |
 | **启用插件** | 打开开关 |
 | **教父站地址** | 默认 `https://www.xn--wcv59z.com`（即 www.教父.com 的 punycode） |
-| **教父站 Cookie** | 必填。浏览器登录教父站后，从开发者工具复制完整 Cookie |
+| **教父站账号 \*** | 必填。教父站登录用户名 / 邮箱，插件会自动登录 |
+| **教父站密码 \*** | 必填。教父站登录密码（密码框显示，仅保存在本机插件配置） |
 | **浏览器验证(PoW)** | 建议开启。站点有人机验证时，用内置浏览器自动完成计算 |
 | **115 网盘 Cookie** | 必填。115 登录后复制，需含 `UID/CID/SEID/KID` 等字段 |
 | **115 目标目录 ID** | `0` 表示根目录 |
@@ -100,12 +101,17 @@ playwright install chromium   # 如需浏览器自动验证 PoW
 | **展示条数** | 结果列表展示前 N 条，默认 8 |
 | **触发后缀** | 默认中文问号 `？`，英文 `?` 同样生效 |
 
-### 如何获取 Cookie
+### 教父站登录说明
 
-- **教父站**：Chrome 登录 → F12 → Network → 刷新页面 → 任选请求 → Request Headers → 复制整行 `Cookie` 值。
-- **115 网盘**：同理，登录 115.com 后复制 `Cookie`（确认包含 `UID`、`CID`、`SEID`、`KID`）。
+- 插件用你填写的**账号 + 密码**，通过内置浏览器自动访问 `/user/login` 登录（表单字段 `username` / `password`），无需手动复制 Cookie。已端到端验证：自动登录后可正常搜索并解析出资源。
+- 登录态与 PoW 验证保留在同一个浏览器上下文，因此每次搜索都是一次完整的自动登录流程，稳定可靠。
+- 兼容旧配置：若仍保留了 `site_cookie` 字段（开发者配置），插件会优先用账号密码，账号密码为空时回退到 Cookie。
 
-> Cookie 会过期。失效后重新登录网站并更新配置即可。
+### 如何获取 115 Cookie
+
+- **115 网盘**：登录 115.com 后 F12 → Network → 刷新 → 任选请求 → Request Headers → 复制 `Cookie`（确认包含 `UID`、`CID`、`SEID`、`KID`）。
+
+> 115 Cookie 会过期，失效后重新登录并更新配置即可。教父站用账号密码则无需关心 Cookie 过期。
 
 ---
 
@@ -132,8 +138,8 @@ playwright install chromium   # 如需浏览器自动验证 PoW
 
 ## 五、合规说明
 
-- 插件**不破解登录鉴权、不打码、不撞库**。所有登录态由用户自己的 Cookie 提供，站点的人机验证仅用真实浏览器环境正常完成。
-- 插件**不收集、不上传**用户 Cookie 到任何第三方；Cookie 仅本地用于访问你本人账号。
+- 插件**不破解登录鉴权、不打码、不撞库**。教父站用用户本人的账号密码在其自有账号上自动登录，115 用用户自己的 Cookie；站点的人机验证仅用真实浏览器环境正常完成。
+- 插件**不收集、不上传**用户账号、密码、Cookie 到任何第三方；这些凭据仅本地用于访问你本人账号。
 - 请确保你有权访问相关内容，并遵守所在地区法律法规及站点服务条款。作者不对使用者的内容访问行为承担责任。
 
 ---
@@ -143,6 +149,7 @@ playwright install chromium   # 如需浏览器自动验证 PoW
 | 能力 | 接口 |
 | --- | --- |
 | 教父站搜索 | `GET {site_url}/search?q=<关键词>` → 提取影片详情链接 `/mv/xxxx` |
+| 教父站自动登录 | `GET {site_url}/user/login` → 填 `username`/`password` → `button[type=submit]` 提交，浏览器上下文保留登录态 |
 | 教父站资源数据 | `GET {site_url}/res/downurl/mv/xxxx` → JSON 列式数组（m=btih / t=标题 / e=做种 / p=画质代码 / s=大小） |
 | PoW 验证 | 站点 `/res/pow`，由内置浏览器自动完成（纯 requests 会被拦截） |
 | 115 分享转存 | `POST https://webapi.115.com/share/receive` (share_code, receive_code, cid, is_check=0) |
@@ -155,5 +162,6 @@ playwright install chromium   # 如需浏览器自动验证 PoW
 
 ## 七、版本
 
+- **v3.2.0 / v1.2.0**：教父站登录方式改为**填写账号 + 密码自动登录**（内置浏览器填表提交 `/user/login`，字段 `username`/`password`），无需再手动复制 Cookie；保留 Cookie 直填作为兼容回退；已用真实账号端到端验证（自动登录 + 解析 128 条资源）。
 - **v3.1.0 / v1.1.0**：实测适配真实站点结构——详情页 `/res/downurl` JSON 列式解析、画质代码映射、做种加权排序、115 离线下载闭环；修复 PoW 等待超时与 Cookie 注入卡死问题；已端到端验证。
 - **v3.0.0 / v1.0.0**：初始版本（基于早期假设的搜索页直链解析，实际站点结构不同）。
