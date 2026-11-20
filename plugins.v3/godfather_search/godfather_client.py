@@ -1,22 +1,28 @@
 """
 教父站（www.教父.com / www.xn--wcv59z.com）搜索客户端。
 
-职责：
-  1. 使用用户提供的站点 Cookie 访问搜索页 /search?q=<关键词>；
-  2. 处理站点的 PoW 浏览器验证（通过 Playwright 有头/无头自动完成）；
-  3. 返回搜索结果 HTML，交给 resource_parser 解析。
+站点真实结构（2026-11 实测）：
+  - 搜索页 /search?q=<词> 只列影片，条目链接形如 /mv/mXr4；
+  - 影片资源数据在详情页数据接口 GET /res/downurl/mv/mXr4（返回列式 JSON）；
+  - 纯 requests 访问会被 PoW「浏览器安全验证」拦截，必须用真实浏览器完成 PoW；
+  - 站内资源本质均为磁力（网盘分类走 keepshare 离线中转），无 115 分享直链。
+
+流程：
+  1. 浏览器带 Cookie 打开搜索页，过 PoW，提取影片详情链接；
+  2. 进入详情页，用页面内 fetch 调 /res/downurl/... 拿 JSON；
+  3. 交 resource_parser.parse_downlist_json() 解析、排序。
 
 合规说明：
-  - 本模块不破解、不绕过站点的登录鉴权；登录态由用户自己提供的 Cookie 承担。
-  - PoW 是站点的反爬校验，用真实浏览器环境自动完成计算，属于正常的客户端行为。
-  - 若站点要求验证码/登录，插件会提示用户补充 Cookie，不会自动打码或撞库。
+  - 本模块不破解鉴权、不打码、不撞库；登录态由用户本人提供的 Cookie 承担。
+  - PoW 用真实浏览器环境自动计算，属于正常客户端行为。
 """
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from urllib.parse import quote, urljoin
 
-from .resource_parser import parse_resources, sort_resources
+from .resource_parser import parse_downlist_json, parse_resources, sort_resources
 
 
 class GodfatherClient:
@@ -31,11 +37,13 @@ class GodfatherClient:
         timeout: int = 25,
         use_browser: bool = True,
         no_proxy: bool = False,
+        max_detail_pages: int = 3,
     ):
         self.cookie = (cookie or "").strip()
         self.base_url = (base_url or self.DEFAULT_BASE).rstrip("/")
         self.timeout = timeout
         self.use_browser = use_browser
+        self.max_detail_pages = max_detail_pages
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": self.UA, "Accept-Language": "zh-CN,zh;q=0.9"})
         if self.cookie:
@@ -43,9 +51,8 @@ class GodfatherClient:
         if no_proxy:
             self.session.trust_env = False
             self.session.proxies = {"http": None, "https": None}
-        self._playwright_ready: Optional[bool] = None
 
-    # -------------------------------------------------- Cookie 解析
+    # -------------------------------------------------- Cookie
     def _cookie_dict(self) -> Dict[str, str]:
         result = {}
         for part in self.cookie.split(";"):
@@ -55,63 +62,37 @@ class GodfatherClient:
         return result
 
     def _has_login(self) -> bool:
-        """粗判是否含登录态 Cookie。"""
         keys = set(self._cookie_dict().keys())
-        return bool(keys & {"session", "uid", "user", "token", "auth", "sess", "PHPSESSID", "user_session"})
+        # 站点登录态关键是 app_auth；兼容其它常见字段
+        return bool(keys & {"app_auth", "auth", "session", "uid", "user", "token", "PHPSESSID"})
 
     # -------------------------------------------------- 搜索入口
     def search(self, keyword: str, page: int = 1) -> Tuple[List[Dict], str]:
-        """
-        搜索影视资源。
-        :return: (资源列表, 状态说明)
-        """
+        """搜索影视资源，返回 (资源列表, 状态说明)。"""
         if not keyword:
             return [], "关键词为空"
 
-        url = f"{self.base_url}/search"
-        params = {"q": keyword}
-        if page > 1:
-            params["page"] = page
+        if not self.use_browser:
+            # 纯 HTTP 模式：站点有 PoW，基本不可用；保留仅作兜底
+            return [], "教父站启用了浏览器安全验证(PoW)，请开启「浏览器验证」选项"
 
-        html, err = self._fetch(url, params)
+        resources, err = self._search_by_browser(keyword)
         if err:
             return [], err
-
-        # 未登录检测
-        if "登录后访问受限内容" in html or ("立即登录" in html and "搜索" not in html):
-            return [], "站点要求登录：请在插件配置中填写教父站 Cookie（浏览器登录后复制）"
-
-        resources = parse_resources(html, self.base_url)
         if not resources:
-            return [], "搜索完成但未解析到 115/磁力资源（可能关键词无结果，或页面结构变化）"
-
+            return [], "搜索完成但未解析到资源（关键词无结果、未登录或页面结构变化）"
         return resources, f"解析到 {len(resources)} 条资源"
 
-    # -------------------------------------------------- 抓取（含 PoW）
-    def _fetch(self, url: str, params: Dict) -> Tuple[str, str]:
-        """抓取页面，优先用 HTTP，检测到 PoW 时切换浏览器。"""
-        try:
-            resp = self.session.get(url, params=params, timeout=self.timeout)
-            html = resp.text
-            if "浏览器安全验证" not in html and "powChallenge" not in html:
-                return html, ""
-        except Exception:
-            pass
-
-        if not self.use_browser:
-            return "", "命中浏览器安全验证(PoW)，请开启「浏览器验证」选项或更新 Cookie"
-
-        return self._fetch_by_browser(url, params)
-
-    def _fetch_by_browser(self, url: str, params: Dict) -> Tuple[str, str]:
-        """用 Playwright + Chromium 自动完成 PoW 后抓取页面。"""
+    # -------------------------------------------------- 浏览器流程（同步 playwright）
+    def _search_by_browser(self, keyword: str) -> Tuple[List[Dict], str]:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
-            return "", "缺少 playwright 依赖，请在 requirements.txt 安装后重试"
+            return [], "缺少 playwright 依赖，请安装后重试（pip install playwright && playwright install chromium）"
 
-        query = "&".join(f"{k}={requests.utils.quote(str(v))}" for k, v in params.items())
-        target = f"{url}?{query}" if query else url
+        all_resources: List[Dict] = []
+        seen_hash: set = set()
+        detail_paths: List[str] = []
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(
@@ -119,47 +100,139 @@ class GodfatherClient:
                     args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
                 )
                 ctx = browser.new_context(
-                    user_agent=self.UA,
-                    locale="zh-CN",
-                    viewport={"width": 1280, "height": 800},
+                    user_agent=self.UA, locale="zh-CN",
+                    viewport={"width": 1280, "height": 900},
                 )
                 if self.cookie:
-                    ctx.add_cookies([
-                        {"name": k, "value": v, "domain": ".xn--wcv59z.com", "path": "/"}
-                        for k, v in self._cookie_dict().items()
-                    ])
+                    # 注入登录态 Cookie，但排除 browser_verified / PHPSESSID：
+                    # 这两个由浏览器重新访问时自行生成，注入旧值会干扰 PoW 验证导致卡死。
+                    ck = {
+                        k: v for k, v in self._cookie_dict().items()
+                        if k.lower() not in {"browser_verified", "phpsessid"}
+                    }
+                    for domain in (".xn--wcv59z.com", "www.xn--wcv59z.com"):
+                        try:
+                            ctx.add_cookies([
+                                {"name": k, "value": v, "domain": domain, "path": "/"}
+                                for k, v in ck.items()
+                            ])
+                        except Exception:
+                            pass
 
                 page = ctx.new_page()
-                page.goto(self.base_url, wait_until="domcontentloaded", timeout=self.timeout * 1000)
-                # 等待 PoW 自动完成（最多 15 秒）
-                for _ in range(15):
-                    if "浏览器安全验证" not in (page.content() or ""):
-                        break
-                    page.wait_for_timeout(1000)
+                ms = self.timeout * 1000
 
-                page.goto(target, wait_until="domcontentloaded", timeout=self.timeout * 1000)
-                page.wait_for_timeout(2000)
-                html = page.content()
+                # 1) 打开搜索页（首页进一次过 PoW，再跳搜索页）
+                try:
+                    page.goto(self.base_url, wait_until="domcontentloaded", timeout=ms)
+                    self._wait_pow(page)
+                    search_url = f"{self.base_url}/search?q={quote(keyword)}"
+                    page.goto(search_url, wait_until="domcontentloaded", timeout=ms)
+                    self._wait_pow(page)
+                    page.wait_for_timeout(5000)
+                except Exception as e:
+                    browser.close()
+                    return [], f"打开搜索页失败: {str(e)[:120]}"
 
-                # 保存最新 Cookie 供后续复用
-                self.cookie = "; ".join(f"{c['name']}={c['value']}" for c in ctx.cookies())
-                self.session.headers.update({"Cookie": self.cookie})
+                html = page.content() or ""
+                # 未登录检测
+                if "立即登录" in html and "退出登录" not in html:
+                    browser.close()
+                    return [], "站点要求登录：请在插件配置中填写教父站 Cookie（浏览器登录后复制完整 Cookie）"
+
+                # 2) 提取影片详情链接 /mv/xxx 或 /tv/xxx
+                detail_paths = self._extract_detail_paths(html, page)
+                if not detail_paths:
+                    # 兜底：直接解析搜索页 HTML 里的磁力/115
+                    fb = parse_resources(html, self.base_url)
+                    browser.close()
+                    return fb, "搜索页无详情链接，已尝试直接解析页面" if fb else "搜索页未找到影片结果"
+
+                # 3) 逐个详情：进页面 -> fetch JSON 接口 -> 解析
+                for path in detail_paths[: self.max_detail_pages]:
+                    try:
+                        page.goto(urljoin(self.base_url, path), wait_until="domcontentloaded", timeout=ms)
+                        self._wait_pow(page)
+                        page.wait_for_timeout(2000)
+                        list_key = path.rstrip("/").split("/")[-1]  # 如 mXr4
+                        api = f"/res/downurl/{path.strip('/')}"
+                        raw = page.evaluate(
+                            """async (u) => {
+                                try {
+                                    const r = await fetch(u, {credentials:'include'});
+                                    return await r.text();
+                                } catch(e) { return ''; }
+                            }""",
+                            api,
+                        )
+                        items = parse_downlist_json(raw)
+                        if not items:
+                            # 接口失败则解析详情页 HTML 兜底
+                            items = parse_resources(page.content() or "", self.base_url)
+                        for it in items:
+                            h = it.get("infohash") or it.get("url")
+                            if h and h not in seen_hash:
+                                seen_hash.add(h)
+                                all_resources.append(it)
+                    except Exception:
+                        continue
+
+                # 保存刷新后的 Cookie（PoW 验证态）
+                try:
+                    self.cookie = "; ".join(f"{c['name']}={c['value']}" for c in ctx.cookies())
+                    self.session.headers.update({"Cookie": self.cookie})
+                except Exception:
+                    pass
                 browser.close()
-                return html, ""
         except Exception as e:
-            return "", f"浏览器抓取失败: {e}"
+            return [], f"浏览器搜索失败: {str(e)[:150]}"
 
-    def check(self) -> Tuple[bool, str]:
-        """检查站点可达性与登录态。"""
-        html, err = self._fetch(self.base_url, {})
-        if err:
-            return False, err
-        if "登录后访问受限内容" in html:
-            return self._has_login(), (
-                "站点可访问，但未检测到登录 Cookie" if not self._has_login()
-                else "站点可访问且已配置 Cookie（登录态需实际搜索验证）"
+        all_resources = sort_resources(all_resources)
+        return all_resources, ""
+
+    def _wait_pow(self, page, max_wait: int = 40) -> None:
+        """等待 PoW 浏览器安全验证自动完成（站点计算较慢，需充分等待）。"""
+        for _ in range(max_wait):
+            try:
+                content = page.content() or ""
+                body = page.locator("body").inner_text() if page.locator("body").count() else ""
+            except Exception:
+                return
+            # 站点 PoW 页面形态：浏览器安全验证 / 安全验证 / 验证完成后将自动继续 / 正在计算 x%
+            # 只要出现验证相关字样（且没有影片内容），就继续等待
+            powing = (
+                "浏览器安全验证" in content
+                or "powChallenge" in content
+                or "安全验证" in body
+                or ("验证" in body and "自动继续" in body)
             )
-        return True, "站点可访问"
+            if not powing:
+                return
+            page.wait_for_timeout(1000)
+
+    def _extract_detail_paths(self, html: str, page) -> List[str]:
+        """从搜索页提取影片详情链接，按标题相关性去重。"""
+        paths: List[str] = []
+        try:
+            links = page.locator("a[href]").all()
+        except Exception:
+            links = []
+        for a in links:
+            try:
+                href = (a.get_attribute("href") or "").strip()
+            except Exception:
+                continue
+            # 形如 /mv/mXr4 或 /tv/xxxx
+            if href.startswith("/mv/") or href.startswith("/tv/"):
+                if href not in paths:
+                    paths.append(href)
+        return paths[: self.max_detail_pages]
+
+    # -------------------------------------------------- 检查
+    def check(self) -> Tuple[bool, str]:
+        if not self._has_login():
+            return False, "未检测到登录 Cookie（app_auth），请先在浏览器登录教父站并复制完整 Cookie"
+        return True, "已配置 Cookie；登录态需实际搜索验证"
 
     def close(self):
         try:
@@ -177,4 +250,4 @@ if __name__ == "__main__":
     rs, msg = c.search(kw)
     print(msg)
     for r in sort_resources(rs)[:5]:
-        print(r["type"], r["quality_label"], r["seeders"], r["title"][:50])
+        print(r["type"], r["quality_label"], "做种", r["seeders"], r["title"][:50])
