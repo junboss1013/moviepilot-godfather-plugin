@@ -23,6 +23,7 @@ from app.schemas.types import EventType
 from .godfather_client import GodfatherClient
 from .pan115_client import Pan115Client
 from .resource_parser import sort_resources
+from .media_identifier import identify_media, build_classify_path
 
 
 class godfather_search(_PluginBase):
@@ -30,7 +31,7 @@ class godfather_search(_PluginBase):
     plugin_name = "教父资源转存"
     plugin_desc = "输入「片名？」搜索教父站：优先转存115网盘资源，否则按画质+做种数选最优磁力用115离线下载。"
     plugin_icon = "godfather.png"
-    plugin_version = "1.2.3"
+    plugin_version = "1.3.0"
     plugin_author = "WorkBuddy"
     author_url = "https://github.com"
     plugin_config_prefix = "godfather_search_"
@@ -54,6 +55,11 @@ class godfather_search(_PluginBase):
         self._max_results = 8
         self._trigger_suffix = "？"
         self._auto_transfer = True
+        # 自动分类：115 网盘内建 电影/电视剧 目录，配合 rclone 挂载供 Emby 刮削
+        self._auto_classify = True
+        self._classify_root = "影视库"
+        self._movie_dir = "电影"
+        self._tv_dir = "电视剧"
 
         self._site_client: Optional[GodfatherClient] = None
         self._pan115: Optional[Pan115Client] = None
@@ -77,6 +83,10 @@ class godfather_search(_PluginBase):
         self._max_results = int(config.get("max_results", 8) or 8)
         self._trigger_suffix = config.get("trigger_suffix") or "？"
         self._auto_transfer = bool(config.get("auto_transfer", True))
+        self._auto_classify = bool(config.get("auto_classify", True))
+        self._classify_root = (config.get("classify_root") or "影视库").strip()
+        self._movie_dir = (config.get("movie_dir") or "电影").strip()
+        self._tv_dir = (config.get("tv_dir") or "电视剧").strip()
 
         self._site_client = None
         self._pan115 = None
@@ -300,6 +310,57 @@ class godfather_search(_PluginBase):
                         "component": "VRow",
                         "content": [{
                             "component": "VCol",
+                            "props": {"cols": 12, "md": 6},
+                            "content": [{
+                                "component": "VSwitch",
+                                "props": {
+                                    "model": "auto_classify", "label": "转存时自动分类(电影/电视剧)",
+                                    "hint": "在115网盘自动建 影视库/电影/片名(年份)、影视库/电视剧/片名/Season XX，配合rclone挂载供Emby分别刮削",
+                                    "persistent-hint": True,
+                                },
+                            }],
+                        }, {
+                            "component": "VCol",
+                            "props": {"cols": 12, "md": 6},
+                            "content": [{
+                                "component": "VTextField",
+                                "props": {
+                                    "model": "classify_root", "label": "分类根目录(115网盘内)",
+                                    "placeholder": "影视库",
+                                    "hint": "Emby 添加媒体库时分别指向此目录下的 电影 / 电视剧 文件夹",
+                                    "persistent-hint": True, "clearable": True,
+                                },
+                            }],
+                        }],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [{
+                            "component": "VCol",
+                            "props": {"cols": 12, "md": 6},
+                            "content": [{
+                                "component": "VTextField",
+                                "props": {
+                                    "model": "movie_dir", "label": "电影目录名",
+                                    "placeholder": "电影", "clearable": True,
+                                },
+                            }],
+                        }, {
+                            "component": "VCol",
+                            "props": {"cols": 12, "md": 6},
+                            "content": [{
+                                "component": "VTextField",
+                                "props": {
+                                    "model": "tv_dir", "label": "电视剧目录名",
+                                    "placeholder": "电视剧", "clearable": True,
+                                },
+                            }],
+                        }],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [{
+                            "component": "VCol",
                             "props": {"cols": 12},
                             "content": [{
                                 "component": "VAlert",
@@ -326,6 +387,10 @@ class godfather_search(_PluginBase):
             "seeders_weight": 1.0,
             "max_results": 8,
             "trigger_suffix": "？",
+            "auto_classify": True,
+            "classify_root": "影视库",
+            "movie_dir": "电影",
+            "tv_dir": "电视剧",
         }
 
     # ---------------- 消息监听 ----------------
@@ -405,7 +470,7 @@ class godfather_search(_PluginBase):
         else:
             plan = self._decide_plan(ranked)
             lines += ["", "─" * 12, f"🎯 自动决策：{plan['reason']}"]
-            result = self._execute(plan["resource"], channel, userid)
+            result = self._execute(plan["resource"], channel, userid, keyword)
             lines.append(result)
 
         lines += ["", "💡 回复编号（如 2？）可转存指定资源。"]
@@ -430,7 +495,7 @@ class godfather_search(_PluginBase):
                               text=f"💾 {resource['title']}\n🔗 {resource['url']}\n\n配置 115 Cookie 后可自动转存。",
                               userid=userid)
             return
-        result = self._execute(resource, channel, userid)
+        result = self._execute(resource, channel, userid, cache.get("keyword", ""))
         self.post_message(channel=channel, title="转存结果", text=result, userid=userid)
 
     def _decide_plan(self, ranked: List[Dict]) -> Dict:
@@ -455,12 +520,24 @@ class godfather_search(_PluginBase):
             }
         return {"resource": None, "reason": "未找到可转存的资源"}
 
-    def _execute(self, resource: Optional[Dict], channel, userid) -> str:
+    def _execute(self, resource: Optional[Dict], channel, userid, keyword: str = "") -> str:
         if not resource:
             return "❌ 无可转存资源"
-        # 目标目录：路径优先
+        # 目标目录：自动分类优先 → 自定义路径 → 目录 ID
         target_cid = self._target_cid or "0"
-        if self._target_path:
+        classify_note = ""
+        kw = keyword or self._cache.get(userid, {}).get("keyword", "")
+        if self._auto_classify and self._pan115:
+            media = identify_media(resource.get("title", ""), kw)
+            rel = build_classify_path(media, self._classify_root, self._movie_dir, self._tv_dir)
+            resolved = self._pan115.get_or_create_folder(rel, "0")
+            if resolved:
+                target_cid = resolved
+                type_label = "电视剧" if media["media_type"] == "tv" else "电影"
+                classify_note = f"\n📂 自动分类：{type_label} → {rel}"
+            else:
+                classify_note = f"\n⚠️ 分类目录「{rel}」创建失败，回退到默认目录"
+        elif self._target_path:
             resolved = self._pan115.get_or_create_folder(self._target_path, target_cid)
             if resolved:
                 target_cid = resolved
@@ -477,4 +554,5 @@ class godfather_search(_PluginBase):
             f"{icon} {result['msg']}\n"
             f"📁 资源：{resource['title'][:50]}\n"
             f"💾 类型：{'115网盘转存' if resource['type'] == '115' else '115离线下载'}"
+            f"{classify_note}"
         )
