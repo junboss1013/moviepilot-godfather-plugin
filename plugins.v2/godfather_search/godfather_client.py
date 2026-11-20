@@ -152,53 +152,91 @@ class GodfatherClient:
             return False, f"浏览器自动登录失败: {str(e)[:150]}"
 
     def _launch_browser(self, p):
-        """多策略启动 Chromium。
+        """多策略启动 Chromium；浏览器缺失时尝试在容器内自动安装（自愈）。
 
         新版 Playwright 的 headless=True 默认找 chrome-headless-shell，而 MoviePilot
-        镜像常只装了完整 chromium 或系统 Chrome。按以下顺序回退，任一成功即用：
+        镜像常未下载任何浏览器二进制。策略顺序：
           1) channel="chromium"（完整 Chromium，自带新版无头模式）
           2) 常见系统 Chrome/Chromium 可执行文件路径
-          3) 默认 headless（本地/已装 headless-shell 的环境）
+          3) 默认 headless（已装 headless-shell 的环境）
+          4) 若都失败且是「浏览器未安装」，自动 playwright install 后重试一次
         返回 (browser, None) 或 (None, 错误信息)。
         """
         base_args = ["--no-sandbox", "--disable-blink-features=AutomationControlled",
                      "--disable-dev-shm-usage"]
-        errors = []
 
-        # 1) 完整 Chromium channel（绕开 chrome-headless-shell 依赖）
-        try:
-            browser = p.chromium.launch(headless=True, channel="chromium", args=base_args)
+        def try_all():
+            errs = []
+            try:
+                return p.chromium.launch(headless=True, channel="chromium", args=base_args), None
+            except Exception as e:
+                errs.append(f"channel=chromium: {str(e)[:110]}")
+            for path in (
+                "/usr/bin/chromium", "/usr/bin/chromium-browser",
+                "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
+                "/usr/bin/chrome", "/opt/google/chrome/chrome",
+            ):
+                if os.path.exists(path):
+                    try:
+                        return p.chromium.launch(headless=True, executable_path=path, args=base_args), None
+                    except Exception as e:
+                        errs.append(f"{path}: {str(e)[:110]}")
+            try:
+                return p.chromium.launch(headless=True, args=base_args), None
+            except Exception as e:
+                errs.append(f"默认: {str(e)[:110]}")
+            return None, errs
+
+        browser, errors = try_all()
+        if browser:
             return browser, None
-        except Exception as e:
-            errors.append(f"channel=chromium: {str(e)[:120]}")
 
-        # 2) 系统已安装的 Chrome/Chromium 可执行文件
-        for path in (
-            "/usr/bin/chromium", "/usr/bin/chromium-browser",
-            "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
-            "/usr/bin/chrome", "/opt/google/chrome/chrome",
-        ):
-            if os.path.exists(path):
-                try:
-                    browser = p.chromium.launch(headless=True, executable_path=path, args=base_args)
-                    return browser, None
-                except Exception as e:
-                    errors.append(f"{path}: {str(e)[:120]}")
-
-        # 3) 默认（本地开发或已装 headless-shell 的环境）
-        try:
-            browser = p.chromium.launch(headless=True, args=base_args)
-            return browser, None
-        except Exception as e:
-            errors.append(f"默认: {str(e)[:120]}")
+        joined = " | ".join(errors)
+        # 仅在确实是「浏览器二进制缺失」时自动安装，避免掩盖其它启动错误
+        if "Executable doesn't exist" in joined or "executable doesn't exist" in joined:
+            ok, install_msg = self._auto_install_browser(p, try_all)
+            if ok:
+                return install_msg, None  # install_msg 此时是 browser
+            joined += " || " + install_msg
 
         hint = (
-            "浏览器未安装。请在 MoviePilot 容器内执行安装命令后重启：\n"
-            "  pip install playwright && playwright install chromium\n"
-            "  （若空间有限可只装无头版：playwright install chromium-headless-shell）\n"
-            "  详情: " + " | ".join(errors[:3])
+            "浏览器未安装，且自动安装未成功。请在 MoviePilot 容器内执行后重启：\n"
+            "  python -m playwright install chromium-headless-shell\n"
+            "  或完整版：python -m playwright install chromium\n"
+            "  （若报 playwright 模块不存在，先 pip install playwright）\n"
+            "  详情: " + joined[:400]
         )
         return None, hint
+
+    def _auto_install_browser(self, p, retry_fn):
+        """在容器内自动下载 Playwright 浏览器二进制。
+
+        用运行插件的同一个 Python 解释器执行 playwright install，确保浏览器装到
+        当前 playwright 使用的缓存目录。返回 (browser, None) 成功，或 (None, 错误说明)。
+        """
+        import subprocess
+        import sys
+        attempts = [
+            [sys.executable, "-m", "playwright", "install", "chromium-headless-shell"],
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            ["playwright", "install", "chromium-headless-shell"],
+        ]
+        logs = []
+        for cmd in attempts:
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=420)
+                logs.append(f"{cmd[-1]} rc={proc.returncode}")
+                if proc.returncode == 0:
+                    browser, _ = retry_fn()
+                    if browser:
+                        return browser, None
+            except subprocess.TimeoutExpired:
+                logs.append(f"{cmd[-1]} 超时")
+            except FileNotFoundError:
+                logs.append(f"{cmd[-1]} 命令不存在")
+            except Exception as e:
+                logs.append(f"{cmd[-1]} {str(e)[:80]}")
+        return None, "自动安装尝试: " + " | ".join(logs)
 
     # -------------------------------------------------- 浏览器流程（同步 playwright）
     def _search_by_browser(self, keyword: str) -> Tuple[List[Dict], str]:
