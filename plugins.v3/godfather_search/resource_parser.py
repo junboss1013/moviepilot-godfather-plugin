@@ -168,11 +168,12 @@ def parse_downlist_json(data: Any) -> List[Dict[str, Any]]:
         if is_zh and "中字" not in q_label:
             q_label = "中字" + q_label
             q_score += 4
-        # 做种数
+        # 做种数（站点对未知值可能返回 -1，钳制到 0）
         try:
             seed = int(seeders[i]) if i < len(seeders) else 0
         except (ValueError, TypeError):
             seed = 0
+        seed = max(0, seed)
         size = str(sizes[i]).strip() if i < len(sizes) else ""
         pub = str(times[i]).strip() if i < len(times) else ""
         # 生成标准磁力链接：btih + dn(标题 urlencode)
@@ -278,8 +279,16 @@ def sort_resources(
 ) -> List[Dict[str, Any]]:
     """按『画质权重 + 做种数权重』加权打分排序，分数高者在前。"""
     def score(r: Dict[str, Any]) -> float:
-        quality = float(r.get("quality", 0) or 0)
-        seeders = int(r.get("seeders", 0) or 0)
+        try:
+            quality = float(r.get("quality", 0) or 0)
+        except (TypeError, ValueError):
+            quality = 0.0
+        try:
+            seeders = int(r.get("seeders", 0) or 0)
+        except (TypeError, ValueError):
+            seeders = 0
+        # 站点对未知做种数可能返回 -1，钳制到 0 避免 math.log10(0) 报 domain error
+        seeders = max(0, seeders)
         return quality * quality_weight + math.log10(seeders + 1) * 30.0 * seeders_weight
     return sorted(resources, key=score, reverse=True)
 
