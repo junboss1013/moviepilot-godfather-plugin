@@ -1,0 +1,4 @@
+beautifulsoup4>=4.12
+requests>=2.31
+# 用于自动完成教父站的 PoW 浏览器验证（可选，但推荐开启浏览器验证时必须安装）
+playwright>=1.44
