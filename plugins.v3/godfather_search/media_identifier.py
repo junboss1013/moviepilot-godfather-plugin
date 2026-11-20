@@ -109,33 +109,35 @@ def build_classify_path(
 ) -> str:
     """
     生成 115 网盘内的分类目录路径（相对根目录）。
-    电影: 影视库/电影/片名 (年份)
-    电视剧: 影视库/电视剧/片名/Season 01
+    电影:   影视库/电影/片名 (年份)
+    电视剧: 影视库/电视剧/片名 (年份)/Season 01
+    文件名不做改动，交由 Emby 从 TMDB 识别刮削。
     """
     name = media.get("name") or "未分类影视"
     root = (root or "").strip().strip("/")
     movie_dir = (movie_dir or "").strip().strip("/") or "电影"
     tv_dir = (tv_dir or "").strip().strip("/") or "电视剧"
 
+    # 电影与电视剧总目录统一带年份
+    year = media.get("year") or ""
+    titled = f"{name} ({year})" if year else name
     if media.get("media_type") == "tv":
-        parts = [root, tv_dir, name]
+        parts = [root, tv_dir, titled]
         season = media.get("season")
         if season:
             parts.append("Season %02d" % int(season))
     else:
-        year = media.get("year") or ""
-        folder = f"{name} ({year})" if year else name
-        parts = [root, movie_dir, folder]
+        parts = [root, movie_dir, titled]
     return "/".join(p for p in parts if p)
 
 
 if __name__ == "__main__":
     demos = [
         ("肖申克的救赎.The.Shawshank.Redemption.1994.1080p.BluRay.x265", "肖申克的救赎"),
-        ("权力的游戏.Game.of.Thrones.S01E01.1080p.中字", "权力的游戏"),
+        ("权力的游戏.Game.of.Thrones.2011.S01E01.1080p.中字", "权力的游戏"),
         ("诡秘之主.第01集.1080p", "诡秘之主"),
         ("阿凡达.Avatar.2009.4K.HDR.REMUX", "阿凡达"),
-        ("怪奇物语.Season.2.全09集.720p", "怪奇物语"),
+        ("怪奇物语.2016.Season.2.全09集.720p", "怪奇物语"),
         ("繁花.2023.全集.4K", "繁花"),
     ]
     for title, kw in demos:
