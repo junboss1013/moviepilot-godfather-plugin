@@ -3,13 +3,13 @@
 
 触发：在任意消息界面发送「影片名？」（以中文/英文问号结尾）。
 流程：
-  1. 登录教父站（使用用户 Cookie）搜索影视资源；
+  1. 用账号密码自动登录教父站（兼容 Cookie）搜索影视资源；
   2. 优先识别 115 网盘资源 → 直接调用 115 转存接口存到网盘；
   3. 若无 115 资源 → 识别磁力资源 → 按「画质 + 做种数」加权排序 → 取最优
      磁力，用 115 离线下载转存到网盘；
   4. 通过消息返回决策依据与执行结果。
 
-合规说明：所有登录态由用户自行提供，插件不破解鉴权、不绕过验证码。
+合规说明：所有登录凭据（账号密码/Cookie）由用户自行提供，插件不破解鉴权、不撞库。
 """
 import re
 import time
@@ -37,7 +37,7 @@ class godfather_search(_PluginBase):
     plugin_name = "教父资源转存"
     plugin_desc = "输入「片名？」搜索教父站：优先转存115网盘资源，否则按画质+做种数选最优磁力用115离线下载。"
     plugin_icon = "godfather.png"
-    plugin_version = "3.1.0"
+    plugin_version = "3.2.0"
     plugin_author = "WorkBuddy"
     author_url = "https://github.com"
     plugin_config_prefix = "godfather_search_"
@@ -48,6 +48,8 @@ class godfather_search(_PluginBase):
     def __init__(self):
         super().__init__()
         self._enabled = False
+        self._site_username = ""
+        self._site_password = ""
         self._site_cookie = ""
         self._site_url = GodfatherClient.DEFAULT_BASE
         self._use_browser = True
@@ -69,6 +71,8 @@ class godfather_search(_PluginBase):
     def init_plugin(self, config: dict = None):
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
+        self._site_username = config.get("site_username", "").strip()
+        self._site_password = config.get("site_password", "").strip()
         self._site_cookie = config.get("site_cookie", "").strip()
         self._site_url = config.get("site_url") or GodfatherClient.DEFAULT_BASE
         self._use_browser = bool(config.get("use_browser", True))
@@ -87,6 +91,8 @@ class godfather_search(_PluginBase):
             try:
                 self._site_client = GodfatherClient(
                     cookie=self._site_cookie,
+                    username=self._site_username,
+                    password=self._site_password,
                     base_url=self._site_url,
                     use_browser=self._use_browser,
                 )
@@ -136,7 +142,7 @@ class godfather_search(_PluginBase):
                                 "component": "VAlert",
                                 "props": {
                                     "type": "info", "variant": "tonal",
-                                    "text": "发送「影片名？」触发搜索。优先转存115资源；无115时按画质+做种数选最优磁力，用115离线下载。所有登录态由你自己的 Cookie 提供。",
+                                    "text": "发送「影片名？」触发搜索。优先转存115资源；无115时按画质+做种数选最优磁力，用115离线下载。请填写教父站账号密码，插件会自动登录（也兼容 Cookie）。",
                                 },
                             }],
                         }],
@@ -183,13 +189,25 @@ class godfather_search(_PluginBase):
                         "component": "VRow",
                         "content": [{
                             "component": "VCol",
-                            "props": {"cols": 12},
+                            "props": {"cols": 12, "md": 6},
                             "content": [{
                                 "component": "VTextField",
                                 "props": {
-                                    "model": "site_cookie", "label": "教父站 Cookie *",
-                                    "placeholder": "浏览器登录后，从开发者工具复制完整 Cookie",
-                                    "hint": "必填。用于以你的登录态搜索资源",
+                                    "model": "site_username", "label": "教父站账号 *",
+                                    "placeholder": "用户名 / 邮箱",
+                                    "hint": "教父站登录账号（用户名或邮箱）",
+                                    "persistent-hint": True, "clearable": True,
+                                },
+                            }],
+                        }, {
+                            "component": "VCol",
+                            "props": {"cols": 12, "md": 6},
+                            "content": [{
+                                "component": "VTextField",
+                                "props": {
+                                    "model": "site_password", "label": "教父站密码 *",
+                                    "placeholder": "登录密码",
+                                    "hint": "教父站登录密码，仅保存在本机插件配置",
                                     "persistent-hint": True, "type": "password", "clearable": True,
                                 },
                             }],
@@ -304,6 +322,8 @@ class godfather_search(_PluginBase):
         ], {
             "enabled": False,
             "site_url": GodfatherClient.DEFAULT_BASE,
+            "site_username": "",
+            "site_password": "",
             "site_cookie": "",
             "use_browser": True,
             "115_cookie": "",
@@ -351,9 +371,9 @@ class godfather_search(_PluginBase):
             self.post_message(channel=channel, title="配置错误",
                               text="教父站客户端未初始化，请检查是否启用插件。", userid=userid)
             return
-        if not self._site_cookie:
-            self.post_message(channel=channel, title="缺少 Cookie",
-                              text="请先配置教父站 Cookie（浏览器登录后复制）再搜索。", userid=userid)
+        if not (self._site_username and self._site_password) and not self._site_cookie:
+            self.post_message(channel=channel, title="缺少登录凭据",
+                              text="请先配置教父站账号和密码（或旧版 Cookie）再搜索。", userid=userid)
             return
 
         resources, msg = self._site_client.search(keyword)
