@@ -147,7 +147,13 @@ class Pan115Client:
             }
         errcode = data.get("errcode")
         if errcode in (10008, 911):
-            return {"state": False, "msg": data.get("error_msg") or "任务已存在或数量受限", "data": data}
+            # 幂等：磁力已在离线任务队列中，目标已达成，视为成功
+            return {
+                "state": True,
+                "msg": "任务已存在（已在离线队列中，无需重复添加）",
+                "idempotent": True,
+                "data": data,
+            }
         return {
             "state": False,
             "msg": f"离线下载失败: {data.get('error_msg') or data.get('error') or errcode or data}",
@@ -171,34 +177,64 @@ class Pan115Client:
         """
         按路径逐级查找/创建目录，返回最终目录 ID。
         path 形如 "媒体库/电影"，留空返回 parent_cid。
+
+        注意：115 的 /files/search 对新建目录存在索引延迟，可能搜不到刚建的目录；
+        且文件夹的 fc 字段为 0（非文件夹为 >0）。因此这里改用 /files 按父 CID
+        列子项查找同名文件夹（fc==0），可靠且不受搜索索引影响。
         """
         path = (path or "").strip().strip("/")
         if not path:
             return parent_cid
-        cid = parent_cid
+        cid = str(parent_cid or "0")
+
+        def _list_folders(parent: str):
+            """列出指定目录下的文件夹，返回 {name: cid}。offset 分页以覆盖较多子项。"""
+            found = {}
+            offset = 0
+            page_size = 200
+            for _ in range(20):  # 最多翻 20 页，避免极端情况下死循环
+                try:
+                    resp = self.session.get(
+                        f"{self.WEBAPI}/files",
+                        params={
+                            "cid": parent, "offset": offset,
+                            "limit": page_size, "show_dir": 1, "type": 0,
+                        },
+                        timeout=self.timeout,
+                    )
+                    data = resp.json().get("data") or []
+                except Exception:
+                    break
+                if not data:
+                    break
+                for it in data:
+                    # fc==0 表示文件夹；同时按 name 精确匹配
+                    if it.get("fc") == 0 and it.get("n"):
+                        found[str(it["n"])] = str(it.get("cid"))
+                if len(data) < page_size:
+                    break
+                offset += page_size
+            return found
+
         for name in path.split("/"):
             name = name.strip()
             if not name:
                 continue
+            folders = _list_folders(cid)
+            if name in folders:
+                cid = folders[name]
+                continue
+            # 未找到则创建
             try:
-                resp = self.session.get(
-                    f"{self.WEBAPI}/files/search",
-                    params={"search_value": name, "cid": cid, "type": 1, "limit": 50},
-                    timeout=self.timeout,
-                )
-                items = resp.json().get("data", [])
-                hit = next((i for i in items if i.get("n") == name and i.get("fc")), None)
-                if hit:
-                    cid = str(hit.get("cid"))
-                    continue
                 resp2 = self.session.post(
                     f"{self.WEBAPI}/files/add",
                     data={"cname": name, "pid": cid},
                     timeout=self.timeout,
                 )
                 d2 = resp2.json()
-                if d2.get("state") and d2.get("file_id"):
-                    cid = str(d2["file_id"])
+                new_id = d2.get("file_id") or d2.get("cid")
+                if d2.get("state") and new_id:
+                    cid = str(new_id)
                 else:
                     return None
             except Exception:
