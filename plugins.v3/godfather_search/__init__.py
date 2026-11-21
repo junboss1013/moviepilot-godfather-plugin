@@ -38,7 +38,7 @@ class godfather_search(_PluginBase):
     plugin_name = "教父资源转存"
     plugin_desc = "输入「片名？」搜索教父站：优先转存115网盘资源，否则按画质+做种数选最优磁力用115离线下载。"
     plugin_icon = "godfather.png"
-    plugin_version = "3.3.1"
+    plugin_version = "3.3.2"
     plugin_author = "WorkBuddy"
     author_url = "https://github.com"
     plugin_config_prefix = "godfather_search_"
@@ -55,8 +55,6 @@ class godfather_search(_PluginBase):
         self._site_url = GodfatherClient.DEFAULT_BASE
         self._use_browser = True
         self._115_cookie = ""
-        self._target_cid = "0"
-        self._target_path = ""
         self._quality_weight = 1.0
         self._seeders_weight = 1.0
         self._max_results = 8
@@ -83,8 +81,6 @@ class godfather_search(_PluginBase):
         self._site_url = config.get("site_url") or GodfatherClient.DEFAULT_BASE
         self._use_browser = bool(config.get("use_browser", True))
         self._115_cookie = config.get("115_cookie", "").strip()
-        self._target_cid = str(config.get("target_cid") or "0")
-        self._target_path = config.get("target_path", "").strip()
         self._quality_weight = float(config.get("quality_weight", 1.0) or 1.0)
         self._seeders_weight = float(config.get("seeders_weight", 1.0) or 1.0)
         self._max_results = int(config.get("max_results", 8) or 8)
@@ -247,29 +243,6 @@ class godfather_search(_PluginBase):
                             "content": [{
                                 "component": "VTextField",
                                 "props": {
-                                    "model": "target_cid", "label": "115 目标目录 ID",
-                                    "placeholder": "0", "hint": "0 表示根目录",
-                                    "persistent-hint": True,
-                                },
-                            }],
-                        }, {
-                            "component": "VCol",
-                            "props": {"cols": 12, "md": 4},
-                            "content": [{
-                                "component": "VTextField",
-                                "props": {
-                                    "model": "target_path", "label": "或按路径转存",
-                                    "placeholder": "媒体库/电影",
-                                    "hint": "填了路径则优先按路径查找/创建目录，忽略上面的 ID",
-                                    "persistent-hint": True, "clearable": True,
-                                },
-                            }],
-                        }, {
-                            "component": "VCol",
-                            "props": {"cols": 12, "md": 4},
-                            "content": [{
-                                "component": "VTextField",
-                                "props": {
                                     "model": "max_results", "label": "展示条数",
                                     "placeholder": "8", "type": "number", "min": 1, "max": 20,
                                 },
@@ -388,8 +361,6 @@ class godfather_search(_PluginBase):
             "site_cookie": "",
             "use_browser": True,
             "115_cookie": "",
-            "target_cid": "0",
-            "target_path": "",
             "quality_weight": 1.0,
             "seeders_weight": 1.0,
             "max_results": 8,
@@ -530,8 +501,8 @@ class godfather_search(_PluginBase):
     def _execute(self, resource: Optional[Dict], channel, userid, keyword: str = "") -> str:
         if not resource:
             return "❌ 无可转存资源"
-        # 目标目录：自动分类优先 → 自定义路径 → 目录 ID
-        target_cid = self._target_cid or "0"
+        # 目标目录：自动分类到 115 网盘对应目录；关闭分类则存根目录
+        target_cid = "0"
         classify_note = ""
         kw = keyword or self._cache.get(userid, {}).get("keyword", "")
         if self._auto_classify and self._pan115:
@@ -543,13 +514,7 @@ class godfather_search(_PluginBase):
                 type_label = "电视剧" if media["media_type"] == "tv" else "电影"
                 classify_note = f"\n📂 自动分类：{type_label} → {rel}"
             else:
-                classify_note = f"\n⚠️ 分类目录「{rel}」创建失败，回退到默认目录"
-        elif self._target_path:
-            resolved = self._pan115.get_or_create_folder(self._target_path, target_cid)
-            if resolved:
-                target_cid = resolved
-            else:
-                return "❌ 115 目标目录创建/查找失败"
+                classify_note = f"\n⚠️ 分类目录「{rel}」创建失败，回退到根目录"
 
         if resource["type"] == "115":
             result = self._pan115.receive_share(resource["url"], target_cid)
