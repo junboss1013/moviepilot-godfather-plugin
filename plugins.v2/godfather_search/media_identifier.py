@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional
 # ---------------------------------------------------------------- 电视剧特征
 _TV_HINTS = [
     re.compile(r"S\s*\d{1,2}\s*E\s*\d{1,3}", re.I),        # S01E01 / S1E1
+    re.compile(r"(?<![A-Za-z0-9])S\s*\d{1,2}(?![0-9Ee])", re.I),  # 纯季号 S02 / S2（无 E）
     re.compile(r"Season\s*[.\s_-]*\d{1,2}", re.I),          # Season 1 / Season.2
     re.compile(r"第\s*[0-9一二三四五六七八九十百]+\s*季"),   # 第一季 / 第2季
     re.compile(r"第\s*\d{1,3}\s*集"),                        # 第01集
@@ -57,6 +58,8 @@ def _extract_season(text: str) -> Optional[int]:
     m = re.search(r"S\s*(\d{1,2})\s*E\s*\d{1,3}", text, re.I)
     if not m:
         m = re.search(r"Season\s*[.\s_-]*(\d{1,2})", text, re.I)
+    if not m:
+        m = re.search(r"(?<![A-Za-z0-9])S\s*(\d{1,2})(?![0-9Ee])", text, re.I)
     if not m:
         m = re.search(r"第\s*([0-9一二三四五六七八九十百]+)\s*季", text)
         if m:
