@@ -1,0 +1,10 @@
+[project]
+name = "godfather-subscribe"
+version = "1.0.0"
+description = "教父订阅转存插件：定时遍历订阅，教父站优先转存115，搜不到回退主程序"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "requests>=2.31",
+    "playwright>=1.44",
+]

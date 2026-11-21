@@ -1,5 +1,18 @@
 # 教父资源转存插件（MoviePilot V3 / V2 双兼容）
 
+> 本仓库包含 **两个独立插件**，可同时安装、互不依赖：
+>
+> | 插件 | 目录 | 用途 |
+> | --- | --- | --- |
+> | **教父资源转存** | `godfather_search` | 手动发「片名？」搜索，立即转存最优资源 |
+> | **教父订阅转存** | `godfather_subscribe` | 定时遍历 MoviePilot 订阅，教父站优先转存，搜不到自动回退主程序 |
+>
+> 下方主体文档以「教父资源转存」为主；「教父订阅转存」的说明见 [第八节](#八教父订阅转存插件)。
+
+---
+
+## 教父资源转存（godfather_search）
+
 输入「影片名？」搜索教父站资源，自动完成：
 
 1. 搜索教父站 → 进入影片详情页，从 `/res/downurl` 数据接口提取全部资源；
@@ -16,20 +29,31 @@
 
 ```
 godfather_search/                      ← 仓库根目录（作为插件源）
-├── package.v3.json                    ← V3 插件市场索引（V3 宿主读取）
-├── package.v2.json                    ← V2 插件市场索引（V2 宿主读取）
+├── package.v3.json                    ← V3 插件市场索引（含两个插件条目）
+├── package.v2.json                    ← V2 插件市场索引（含两个插件条目）
 ├── icons/
 │   └── godfather.png
 ├── plugins.v3/                        ← MoviePilot V3（3.x）用
-│   └── godfather_search/
-│       ├── __init__.py                ← 主类：V3 SDK 优先、V2 旧路径回退
-│       ├── godfather_client.py        ← 教父站搜索（账号密码自动登录 + PoW）
-│       ├── pan115_client.py           ← 115：分享转存 + 磁力离线下载
-│       ├── resource_parser.py         ← 资源解析 + 画质/做种识别 + 加权排序
-│       ├── pyproject.toml             ← V3 依赖清单
+│   ├── godfather_search/              ← 插件1：手动搜索转存
+│   │   ├── __init__.py                ← 主类：V3 SDK 优先、V2 旧路径回退
+│   │   ├── godfather_client.py        ← 教父站搜索（账号密码自动登录 + PoW）
+│   │   ├── pan115_client.py           ← 115：分享转存 + 磁力离线下载
+│   │   ├── resource_parser.py         ← 资源解析 + 画质/做种识别 + 加权排序
+│   │   ├── media_identifier.py        ← 电影/电视剧识别 + 分类路径
+│   │   ├── pyproject.toml             ← V3 依赖清单
+│   │   └── README.md
+│   └── godfather_subscribe/           ← 插件2：订阅联动（定时遍历订阅）
+│       ├── __init__.py                ← 主类：cron 服务 + 订阅遍历 + 优先转存
+│       ├── subscribe_helper.py        ← 订阅读取/结束 + 按季去重 + 资源匹配
+│       ├── godfather_client.py        ← 复用教父站客户端
+│       ├── pan115_client.py           ← 复用 115 客户端
+│       ├── resource_parser.py         ← 复用资源解析
+│       ├── media_identifier.py        ← 复用媒体识别
+│       ├── pyproject.toml
 │       └── README.md
-└── plugins.v2/                        ← MoviePilot V2 用（同样内容，requirements.txt）
-    └── godfather_search/
+└── plugins.v2/                        ← MoviePilot V2 用（同上两个插件，requirements.txt）
+    ├── godfather_search/
+    └── godfather_subscribe/
 ```
 
 > 同一个仓库地址可同时服务 V3 与 V2：MoviePilot 按自身版本读取对应索引与目录，无需区分填写。
@@ -206,7 +230,31 @@ python -m playwright install chromium-headless-shell
 
 ---
 
+## 八、教父订阅转存插件（godfather_subscribe）
+
+独立插件，安装时在插件市场搜索「**教父订阅转存**」。详细配置见 `plugins.v3/godfather_subscribe/README.md`。
+
+**核心机制：**
+
+1. **定时遍历**：通过 `get_service()` 注册 cron 服务（默认每天 8:00、20:00 各一次，可在配置页改），也可选「订阅新增时立即尝试一次」。
+2. **教父优先**：对每个订阅用片名搜教父站，片名+年份校验后按画质/做种择优，115 分享直转或磁力离线下载，并自动分类到 `影视库/电影/片名 (年份)` 或 `影视库/电视剧/剧名 (年份)/Season XX`。
+3. **搜不到回退**：教父站无结果时**不干预订阅**，交回 MoviePilot 主程序自身搜索——这是事实上的"插件优先、失败回退"。插件无法硬拦截主程序内置订阅链。
+4. **电影结束订阅**：电影转存成功后结束该订阅（可通过开关关闭），避免主程序重复下载。
+5. **电视剧按季追更**：转存某季后记入进度（`gf_sub_progress`），后续跳过已转存季、只补新季，订阅保持激活以继续追更。教父站资源多为整季打包，追更粒度是**按季**而非按集。
+
+**配置项**（除通用的教父站账号/115 Cookie 外）：定时 Cron、订阅类型范围（both/movie/tv）、电影成功后结束订阅、订阅新增立即尝试、转存自动分类、画质/做种权重。
+
+> 注册后可在 **设定 → 服务** 中看到 `教父订阅转存（定时遍历订阅）`，支持查看状态与手动运行。
+
+---
+
 ## 七、版本
+
+### 教父订阅转存（godfather_subscribe）
+
+- **v1.0.0**：首个版本。cron 定时遍历订阅，教父站优先转存 115（分享/磁力离线），搜不到自动回退主程序；电影成功后结束订阅防重复，电视剧按季去重保留追更；含片名+年份匹配校验、自动分类、订阅新增即时触发（可选）。V2/V3 双实现。
+
+### 教父资源转存（godfather_search）
 
 - **v3.3.3 / v1.3.3**：真实 115 联动测试修复三处问题——①建目录改用 `/files` 列目录接口（原 `/files/search` 对新建目录有索引延迟，导致逐级建目录失败）；②电视剧识别支持纯季号 `S02`（原来只认 `S01E01`，整季资源被误判为电影）；③磁力重复任务（errcode 10008/911）视为幂等成功。**已在真实 MoviePilot 实例 + 115 网盘联动验证**：电影建 `影视库/电影/肖申克的救赎 (1994)`、电视剧建 `影视库/电视剧/权力的游戏/Season 02`，离线任务添加成功。
 - **v3.3.2 / v1.3.2**：移除「115 目标目录 ID」「或按路径转存」两个手动配置项——转存目录完全由自动分类决定（关闭分类则存根目录），配置更简洁。
