@@ -24,10 +24,40 @@
 """
 import os
 import time
+import threading
+import contextlib
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from urllib.parse import quote, urljoin
+
+# 两个插件实例（资源转存 + 订阅转存）在同一进程内可能同时触发浏览器搜索，
+# 用进程内互斥锁 + 跨进程文件锁串行化浏览器登录/搜索，避免导航竞态与资源争抢。
+_MP_LOCK = threading.RLock()
+try:
+    import fcntl
+except (ImportError, ModuleNotFoundError):
+    fcntl = None
+_BROWSER_LOCK_FILE = "/tmp/godfather_browser.lock"
+
+
+@contextlib.contextmanager
+def _browser_guard():
+    """浏览器操作串行锁：线程锁 + 文件锁，覆盖同进程多插件实例与跨进程调用。"""
+    with _MP_LOCK:
+        fh = None
+        try:
+            if fcntl:
+                fh = open(_BROWSER_LOCK_FILE, "a+")
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            if fh:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+                fh.close()
 
 from .resource_parser import parse_downlist_json, parse_resources, sort_resources
 
@@ -66,6 +96,34 @@ class GodfatherClient:
             self.session.trust_env = False
             self.session.proxies = {"http": None, "https": None}
 
+    # -------------------------------------------------- 导航工具
+    def _goto(self, page, url: str, wait_until: str = "domcontentloaded",
+              timeout: int = None, attempts: int = 3) -> bool:
+        """带「导航被另一导航中断」重试的 page.goto。
+
+        站点首页 PoW 完成后会异步自动跳转回 /，若此时立即 goto 登录页，
+        Playwright 抛 'Navigation ... is interrupted by another navigation'。
+        这里捕获该异常，等待异步跳转结束后重试。返回是否成功。
+        """
+        last_err = None
+        for i in range(attempts):
+            try:
+                page.goto(url, wait_until=wait_until,
+                          timeout=(timeout or self.timeout) * 1000)
+                return True
+            except Exception as e:
+                last_err = e
+                msg = str(e).lower()
+                if "interrupted by another navigation" in msg or "another navigation" in msg:
+                    # 等待触发中断的那个异步跳转落定后再试
+                    try:
+                        page.wait_for_timeout(1200 + i * 800)
+                    except Exception:
+                        pass
+                    continue
+                raise
+        raise last_err
+
     # -------------------------------------------------- Cookie
     def _cookie_dict(self) -> Dict[str, str]:
         result = {}
@@ -90,7 +148,9 @@ class GodfatherClient:
         if not self.use_browser:
             return [], "教父站启用了浏览器安全验证(PoW)，请开启「浏览器验证」选项"
 
-        resources, err = self._search_by_browser(keyword)
+        # 串行化浏览器搜索：避免两个插件同时开浏览器导致 PoW 导航竞态/资源争抢
+        with _browser_guard():
+            resources, err = self._search_by_browser(keyword)
         if err:
             return [], err
         if not resources:
@@ -102,8 +162,8 @@ class GodfatherClient:
         """在浏览器里用账号密码登录；登录态保留在同一 context。返回 (是否成功, 说明)。"""
         ms = self.timeout * 1000
         try:
-            page.goto(urljoin(self.base_url, self.LOGIN_PATH),
-                      wait_until="domcontentloaded", timeout=ms)
+            self._goto(page, urljoin(self.base_url, self.LOGIN_PATH),
+                       wait_until="domcontentloaded", timeout=self.timeout)
             self._wait_pow(page, max_wait=30)
             page.wait_for_timeout(1200)
 
@@ -262,7 +322,8 @@ class GodfatherClient:
 
                 # 先过首页 PoW，建立基础 Cookie / 完成安全验证
                 try:
-                    page.goto(self.base_url, wait_until="domcontentloaded", timeout=ms)
+                    self._goto(page, self.base_url, wait_until="domcontentloaded",
+                               timeout=self.timeout)
                     self._wait_pow(page)
                 except Exception as e:
                     browser.close()
@@ -293,7 +354,8 @@ class GodfatherClient:
                 # 1) 打开搜索页
                 try:
                     search_url = f"{self.base_url}/search?q={quote(keyword)}"
-                    page.goto(search_url, wait_until="domcontentloaded", timeout=ms)
+                    self._goto(page, search_url, wait_until="domcontentloaded",
+                               timeout=self.timeout)
                     self._wait_pow(page)
                     page.wait_for_timeout(5000)
                 except Exception as e:
@@ -318,7 +380,8 @@ class GodfatherClient:
                 # 3) 逐个详情：进页面 -> fetch JSON 接口 -> 解析
                 for path in detail_paths[: self.max_detail_pages]:
                     try:
-                        page.goto(urljoin(self.base_url, path), wait_until="domcontentloaded", timeout=ms)
+                        self._goto(page, urljoin(self.base_url, path),
+                                   wait_until="domcontentloaded", timeout=self.timeout)
                         self._wait_pow(page)
                         page.wait_for_timeout(2000)
                         api = f"/res/downurl/{path.strip('/')}"
