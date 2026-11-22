@@ -36,7 +36,7 @@ class godfather_subscribe(_PluginBase):
     plugin_name = "教父订阅转存"
     plugin_desc = "定时遍历MoviePilot订阅：教父站搜到就优先转存115，搜不到回退主程序。电影成功后结束订阅，电视剧按季去重继续追更。"
     plugin_icon = "godfather.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "WorkBuddy"
     author_url = "https://github.com"
     plugin_config_prefix = "godfather_subscribe_"
