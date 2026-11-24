@@ -30,7 +30,7 @@ class godfather_search(_PluginBase):
     plugin_name = "教父资源转存"
     plugin_desc = "三级交互：片名？→影视列表(电影/各季分开)→回复影视序号看资源列表(可翻页)→回复资源序号才转存115网盘。"
     plugin_icon = "godfather.png"
-    plugin_version = "1.5.1"
+    plugin_version = "1.5.2"
     plugin_author = "WorkBuddy"
     author_url = "https://github.com"
     plugin_config_prefix = "godfather_search_"

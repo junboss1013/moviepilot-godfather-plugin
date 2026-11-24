@@ -2,8 +2,8 @@
 教父站（www.教父.com / www.xn--wcv59z.com）搜索客户端。
 
 站点真实结构（2026-11 实测）：
-  - 搜索页 /search?q=<词> 只列影片，条目链接形如 /mv/mXr4；
-  - 影片资源数据在详情页数据接口 GET /res/downurl/mv/mXr4（返回列式 JSON）；
+  - 搜索页 /search?q=<词> 只列影片，条目链接按分类：电影 /mv/xxx、剧集 /tv/xxx、动漫 /ac/xxx；
+  - 影片资源数据在详情页数据接口 GET /res/downurl/<mv|tv|ac>/xxx（返回列式 JSON，动漫同接口）；
   - 纯 requests 访问会被 PoW「浏览器安全验证」拦截，必须用真实浏览器完成 PoW；
   - 站内资源本质均为磁力（网盘分类走 keepshare 离线中转），无 115 分享直链。
 
@@ -257,8 +257,10 @@ class GodfatherClient:
 
     @staticmethod
     def _norm_detail_path(href: str, base_url: str) -> str:
-        """把各种形态的详情链接归一化为 /mv/xxx 或 /tv/xxx。
-        兼容：/mv/xxx、完整 https URL、//域名/mv/xxx、带 ?query/#anchor、末尾斜杠。"""
+        """把各种形态的详情链接归一化为 /mv/xxx、/tv/xxx 或 /ac/xxx。
+        站点真实分类（2026-11 实测）：电影=/mv、剧集=/tv、动漫=/ac。
+        此前只认 mv/tv，导致动漫（如黑色五叶草第一/二季）被漏掉。
+        兼容：相对路径、完整 https URL、//域名、带 ?query/#anchor、末尾斜杠。"""
         if not href:
             return ""
         try:
@@ -267,7 +269,8 @@ class GodfatherClient:
             path = parsed.path or ""
         except Exception:
             path = href.split("?")[0].split("#")[0]
-        m = re.search(r"/(mv|tv)/([A-Za-z0-9_-]+)", path)
+        # mv=电影 / tv=剧集 / ac=动漫（实测站点动漫详情前缀为 /ac/）
+        m = re.search(r"/(mv|tv|ac)/([A-Za-z0-9_-]+)", path)
         if not m:
             return ""
         return f"/{m.group(1)}/{m.group(2)}"
