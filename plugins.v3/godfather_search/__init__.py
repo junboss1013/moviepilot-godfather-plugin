@@ -37,7 +37,7 @@ class godfather_search(_PluginBase):
     plugin_name = "教父资源转存"
     plugin_desc = "三级交互：片名？→影视列表(电影/各季分开)→回复影视序号看资源列表(可翻页)→回复资源序号才转存115网盘。"
     plugin_icon = "godfather.png"
-    plugin_version = "3.5.0"
+    plugin_version = "3.5.1"
     plugin_author = "WorkBuddy"
     author_url = "https://github.com"
     plugin_config_prefix = "godfather_search_"
@@ -444,6 +444,14 @@ class godfather_search(_PluginBase):
             return False
         return True
 
+    @staticmethod
+    def _media_card_label(title: str) -> str:
+        """影视卡片展示名：直接用站点真实标题，仅把结尾裸年份规范为 (YYYY)。
+        绝不用搜索关键词覆盖——否则模糊搜索出的多部不同影片会被显示成同一个名字。"""
+        raw = (title or "未命名影视").strip()
+        mm = re.search(r"^(.*?)[\s._-]+((?:19|20)\d{2})\s*$", raw)
+        return f"{mm.group(1).strip()} ({mm.group(2)})" if mm else raw
+
     def _handle_search(self, keyword: str, channel, userid):
         """第一级：模糊搜索 → 展示影视列表（电影 / 各季分开），不取资源。"""
         self.post_message(channel=channel, title="教父搜索",
@@ -465,12 +473,8 @@ class godfather_search(_PluginBase):
             f"🎬 「{keyword}」影视列表（共 {len(media_list)} 部）：", "",
         ]
         for i, m in enumerate(media_list, 1):
-            title = m.get("title") or "未命名影视"
-            name, year = identify_media(title, keyword).get("name"), None
-            yr = re.search(r"(?:19|20)\d{2}", title)
-            year = yr.group(0) if yr else ""
-            label = f"{name} ({year})" if (name and year) else title
-            lines.append(f"{i}. {label}")
+            # 直接展示站点卡片真实标题，不用搜索关键词覆盖片名
+            lines.append(f"{i}. {self._media_card_label(m.get('title'))}")
         lines += ["", "💡 回复影视序号查看其资源列表；如「1」；发「片名？」重新搜索。"]
         self.post_message(channel=channel, title="影视列表",
                           text="\n".join(lines), userid=userid)
@@ -481,11 +485,7 @@ class godfather_search(_PluginBase):
         keyword = cache.get("keyword", "")
         lines = [f"🎬 「{keyword}」影视列表（共 {len(media_list)} 部）：", ""]
         for i, m in enumerate(media_list, 1):
-            title = m.get("title") or "未命名影视"
-            yr = re.search(r"(?:19|20)\d{2}", title)
-            year = yr.group(0) if yr else ""
-            label = f"{title} ({year})" if year else title
-            lines.append(f"{i}. {label}")
+            lines.append(f"{i}. {self._media_card_label(m.get('title'))}")
         lines += ["", "💡 回复影视序号查看其资源列表。"]
         self.post_message(channel=channel, title="影视列表",
                           text="\n".join(lines), userid=userid)

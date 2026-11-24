@@ -30,7 +30,7 @@ import contextlib
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlparse
 
 # 两个插件实例（资源转存 + 订阅转存）在同一进程内可能同时触发浏览器搜索，
 # 用进程内互斥锁 + 跨进程文件锁串行化浏览器登录/搜索，避免导航竞态与资源争抢。
@@ -226,7 +226,9 @@ class GodfatherClient:
                     self._goto(page, search_url, wait_until="domcontentloaded",
                                timeout=self.timeout)
                     self._wait_pow(page)
-                    page.wait_for_timeout(3000)
+                    # 充分等待 + 滚动触发懒加载，避免只抓到首屏少数卡片
+                    page.wait_for_timeout(4000)
+                    self._scroll_load_all(page)
                     cards = self._extract_media_cards(page)
                     self._save_context_cookie(ctx)
                 finally:
@@ -237,8 +239,42 @@ class GodfatherClient:
             return [], "搜索页未找到影视卡片（关键词无结果或页面结构变化）"
         return cards, ""
 
+    def _scroll_load_all(self, page) -> None:
+        """滚动页面到底部触发懒加载/无限滚动，尽量让全部影视卡片渲染出来。"""
+        try:
+            last = -1
+            for _ in range(8):
+                cur = page.evaluate("document.body.scrollHeight")
+                if cur == last:
+                    break
+                last = cur
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(800)
+            page.evaluate("window.scrollTo(0, 0)")
+            page.wait_for_timeout(300)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _norm_detail_path(href: str, base_url: str) -> str:
+        """把各种形态的详情链接归一化为 /mv/xxx 或 /tv/xxx。
+        兼容：/mv/xxx、完整 https URL、//域名/mv/xxx、带 ?query/#anchor、末尾斜杠。"""
+        if not href:
+            return ""
+        try:
+            full = urljoin(base_url, href)
+            parsed = urlparse(full)
+            path = parsed.path or ""
+        except Exception:
+            path = href.split("?")[0].split("#")[0]
+        m = re.search(r"/(mv|tv)/([A-Za-z0-9_-]+)", path)
+        if not m:
+            return ""
+        return f"/{m.group(1)}/{m.group(2)}"
+
     def _extract_media_cards(self, page) -> List[Dict]:
-        """从搜索页提取影视卡片：按详情路径去重，标题取同一路径下信息量最大的文本。"""
+        """从搜索页提取影视卡片：按详情路径去重，标题取同一路径下信息量最大的文本。
+        旧实现只认 '/mv/' 开头的相对 href，完整 URL / 带 query / 相对 './mv/x' 会被漏掉。"""
         best: Dict[str, str] = {}
         order: List[str] = []
         try:
@@ -250,30 +286,43 @@ class GodfatherClient:
                 href = (a.get_attribute("href") or "").strip()
             except Exception:
                 continue
-            if not (href.startswith("/mv/") or href.startswith("/tv/")):
+            canon = self._norm_detail_path(href, self.base_url)
+            if not canon:
                 continue
+            # 标题来源优先级：链接文本 → title 属性 → img[alt] → 父容器文本
             title = ""
             try:
                 title = (a.inner_text() or "").strip()
             except Exception:
                 pass
-            if not title:
+            if len(title) < 6:
                 try:
-                    title = (a.get_attribute("title") or "").strip()
+                    t = (a.get_attribute("title") or "").strip()
+                    if len(t) > len(title):
+                        title = t
                 except Exception:
                     pass
-            if not title:
+            if len(title) < 6:
                 try:
                     for img in a.locator("img").all()[:1]:
-                        title = (img.get_attribute("alt") or "").strip()
+                        alt = (img.get_attribute("alt") or "").strip()
+                        if len(alt) > len(title):
+                            title = alt
+                except Exception:
+                    pass
+            if len(title) < 6:
+                try:
+                    parent_text = (a.locator("xpath=..").inner_text() or "").strip()
+                    if len(parent_text) > len(title) and len(parent_text) <= 120:
+                        title = parent_text
                 except Exception:
                     pass
             title = re.sub(r"\s+", " ", title).strip()[:100]
-            if href not in best:
-                best[href] = ""
-                order.append(href)
-            if len(title) > len(best[href]):
-                best[href] = title
+            if canon not in best:
+                best[canon] = ""
+                order.append(canon)
+            if len(title) > len(best[canon]):
+                best[canon] = title
         return [
             {"path": href, "title": best[href] or href.rsplit("/", 1)[-1]}
             for href in order
