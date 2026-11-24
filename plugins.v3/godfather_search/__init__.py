@@ -1,13 +1,11 @@
 """
-教父资源转存插件（MoviePilot V2）。
+教父资源转存插件（MoviePilot V3 / V2 双兼容）。
 
-触发：在任意消息界面发送「影片名？」（以中文/英文问号结尾）。
-流程：
-  1. 用账号密码自动登录教父站（兼容 Cookie）搜索影视资源；
-  2. 优先识别 115 网盘资源 → 直接调用 115 转存接口存到网盘；
-  3. 若无 115 资源 → 识别磁力资源 → 按「画质 + 做种数」加权排序 → 取最优
-     磁力，用 115 离线下载转存到网盘；
-  4. 通过消息返回决策依据与执行结果。
+两步交互（不再自动下载第一个）：
+  1. 在任意消息界面发送「影片名？」→ 用账号密码自动登录教父站（兼容 Cookie）
+     搜索影视资源，在聊天框展示带序号的媒体列表（片名/年份/类型/画质/做种）；
+  2. 用户回复列表中的序号（如「7」，带不带问号均可）→ 才把对应资源转存到 115
+     网盘（115 分享直转 / 磁力离线下载）。
 
 合规说明：所有登录凭据（账号密码/Cookie）由用户自行提供，插件不破解鉴权、不撞库。
 """
@@ -36,9 +34,9 @@ from .media_identifier import identify_media, build_classify_path
 class godfather_search(_PluginBase):
     # ---------------- 插件元信息 ----------------
     plugin_name = "教父资源转存"
-    plugin_desc = "输入「片名？」搜索教父站：优先转存115网盘资源，否则按画质+做种数选最优磁力用115离线下载。"
+    plugin_desc = "输入「片名？」在聊天框展示带序号的媒体列表；回复序号（如 7）才转存对应资源到115网盘，不再自动下载第一个。"
     plugin_icon = "godfather.png"
-    plugin_version = "3.3.4"
+    plugin_version = "3.4.0"
     plugin_author = "WorkBuddy"
     author_url = "https://github.com"
     plugin_config_prefix = "godfather_search_"
@@ -148,7 +146,7 @@ class godfather_search(_PluginBase):
                                 "component": "VAlert",
                                 "props": {
                                     "type": "info", "variant": "tonal",
-                                    "text": "发送「影片名？」触发搜索。优先转存115资源；无115时按画质+做种数选最优磁力，用115离线下载。请填写教父站账号密码，插件会自动登录（也兼容 Cookie）。",
+                                    "text": "两步操作：① 发送「影片名？」在聊天框展示带序号的媒体列表（不会自动下载）；② 回复序号（如 7，带不带问号均可）才把对应资源转存到115网盘。请填写教父站账号密码（会自动登录，也兼容 Cookie）与115 Cookie。",
                                 },
                             }],
                         }],
@@ -383,19 +381,25 @@ class godfather_search(_PluginBase):
         userid = event_data.get("userid")
         channel = event_data.get("channel")
 
-        # 触发词：以配置的问号结尾（同时兼容英文 ?）
         clean = text.rstrip("？?").strip()
-        if not (text.endswith("？") or text.endswith("?")):
-            return
         if not clean:
             return
 
-        # 纯数字：选择上一条结果中的某个资源
-        if clean.isdigit():
+        # ① 纯数字：选择上一条结果中的某个资源（带不带问号均可，如截图中的「7」）
+        #    仅当该用户确有缓存结果时才吞掉这条消息，避免误判普通数字聊天
+        if clean.isdigit() and userid in self._cache:
             self._handle_pick(int(clean), channel, userid)
             return
 
-        # 关键词搜索
+        # ② 纯数字但没有缓存：提示先搜索（同样兼容无问号输入）
+        if clean.isdigit():
+            self.post_message(channel=channel, title="提示",
+                              text="请先发送「片名？」搜索，再回复序号转存。", userid=userid)
+            return
+
+        # ③ 关键词搜索：以配置的问号结尾（同时兼容英文 ?）
+        if not (text.endswith("？") or text.endswith("?")):
+            return
         self._handle_search(clean, channel, userid)
 
     # ---------------- 核心流程 ----------------
@@ -418,42 +422,47 @@ class godfather_search(_PluginBase):
                               text=f"❌ {msg}", userid=userid)
             return
 
-        # 缓存结果
-        self._cache[userid] = {
-            "keyword": keyword, "resources": resources, "timestamp": time.time(),
-        }
-
-        # 排序后的资源
+        # 排序后截取展示列表，并按展示序号缓存（保证「展示序号 == 转存序号」）
         ranked = sort_resources(resources, self._quality_weight, self._seeders_weight)
         top = ranked[:self._max_results]
+        self._cache[userid] = {
+            "keyword": keyword, "resources": top, "items": top,
+            "timestamp": time.time(),
+        }
 
-        lines = [f"🎬 「{keyword}」找到 {len(resources)} 条资源（展示前 {len(top)}）:", ""]
-        for i, r in enumerate(top, 1):
-            if r["type"] == "115":
-                lines.append(
-                    f"【{i}】💾115 {r['quality_label']} {r['title'][:46]}\n"
-                    f"    🔑 {r.get('receive_code') or '无码'}  📦 {r.get('size') or '-'}"
-                )
-            else:
-                lines.append(
-                    f"【{i}】🧲磁力 {r['quality_label']} 做种{r['seeders']} {r['title'][:42]}\n"
-                    f"    📦 {r.get('size') or '-'}"
-                )
+        lines = self._format_media_list(keyword, top, len(resources))
 
-        # 决策：优先 115，否则最优磁力
         if not self._pan115 or not self._115_cookie:
-            lines += ["", "⚠️ 未配置 115 Cookie，无法自动转存。", "💡 回复编号可查看该资源链接。"]
-        elif not self._auto_transfer:
-            lines += ["", "💡 自动转存已关闭，回复编号执行转存。"]
+            lines += ["", "⚠️ 未配置 115 Cookie，回复序号仅展示资源链接，无法转存。"]
         else:
-            plan = self._decide_plan(ranked)
-            lines += ["", "─" * 12, f"🎯 自动决策：{plan['reason']}"]
-            result = self._execute(plan["resource"], channel, userid, keyword)
-            lines.append(result)
+            lines += ["", f"💡 回复序号（1-{len(top)}，如 7；带不带问号均可）转存对应资源。"]
 
-        lines += ["", "💡 回复编号（如 2？）可转存指定资源。"]
-        self.post_message(channel=channel, title="教父资源结果",
+        self.post_message(channel=channel, title="媒体列表",
                           text="\n".join(lines), userid=userid)
+
+    def _format_media_list(self, keyword: str, top: List[Dict], total: int) -> List[str]:
+        """把排序后的资源格式化成带序号的媒体列表（不触发任何转存）。"""
+        lines = [f"🎬 「{keyword}」媒体列表（共 {total} 条，展示前 {len(top)}）：", ""]
+        for i, r in enumerate(top, 1):
+            media = identify_media(r.get("title", ""), keyword)
+            name = media.get("name") or keyword
+            year = media.get("year") or ""
+            title = f"{name} ({year})" if year else name
+            if media.get("media_type") == "tv":
+                typ = "电视剧"
+                if media.get("season"):
+                    typ += f" S{int(media['season']):02d}"
+            else:
+                typ = "电影"
+            if r["type"] == "115":
+                src = f"💾115 {r.get('quality_label') or ''}"
+                extra = f"🔑 {r.get('receive_code') or '无码'}"
+            else:
+                src = f"🧲磁力 {r.get('quality_label') or ''} 做种{r.get('seeders', 0)}"
+                extra = f"📦 {r.get('size') or '-'}"
+            lines.append(f"{i}. {title} · {typ}")
+            lines.append(f"   {src}  {extra}")
+        return lines
 
     def _handle_pick(self, number: int, channel, userid):
         cache = self._cache.get(userid)
@@ -461,13 +470,15 @@ class godfather_search(_PluginBase):
             self.post_message(channel=channel, title="提示",
                               text="结果已过期，请重新搜索。", userid=userid)
             return
-        ranked = sort_resources(cache["resources"], self._quality_weight, self._seeders_weight)
-        top = ranked[:self._max_results]
-        if not (1 <= number <= len(top)):
+        # 使用展示时缓存的同一份列表，保证「看到的序号 == 转存的资源」
+        items = cache.get("items") or sort_resources(
+            cache["resources"], self._quality_weight, self._seeders_weight
+        )[:self._max_results]
+        if not (1 <= number <= len(items)):
             self.post_message(channel=channel, title="编号错误",
-                              text=f"请输入 1-{len(top)} 之间的编号。", userid=userid)
+                              text=f"请输入 1-{len(items)} 之间的序号。", userid=userid)
             return
-        resource = top[number - 1]
+        resource = items[number - 1]
         if not self._pan115 or not self._115_cookie:
             self.post_message(channel=channel, title="资源链接",
                               text=f"💾 {resource['title']}\n🔗 {resource['url']}\n\n配置 115 Cookie 后可自动转存。",
