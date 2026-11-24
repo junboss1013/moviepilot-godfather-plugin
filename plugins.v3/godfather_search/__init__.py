@@ -1,11 +1,12 @@
 """
 教父资源转存插件（MoviePilot V3 / V2 双兼容）。
 
-两步交互（不再自动下载第一个）：
-  1. 在任意消息界面发送「影片名？」→ 用账号密码自动登录教父站（兼容 Cookie）
-     搜索影视资源，在聊天框展示带序号的媒体列表（片名/年份/类型/画质/做种）；
-  2. 用户回复列表中的序号（如「7」，带不带问号均可）→ 才把对应资源转存到 115
-     网盘（115 分享直转 / 磁力离线下载）。
+三级交互（电影/多季分开选，资源列表分页，不自动下载）：
+  1. 发送「影片名？」→ 自动登录教父站，模糊搜索并在聊天框展示【影视列表】
+     （电影、第一季、第二季… 各自独立，带序号）；
+  2. 回复影视序号 → 精确搜索该影视详情页的全部资源，展示【资源列表】
+     （带全局序号，每页 8 条，可「上一页/下一页」翻页，「返回」换影视）；
+  3. 回复资源序号（带不带问号均可）→ 才把对应资源转存到 115 网盘。
 
 合规说明：所有登录凭据（账号密码/Cookie）由用户自行提供，插件不破解鉴权、不撞库。
 """
@@ -34,9 +35,9 @@ from .media_identifier import identify_media, build_classify_path
 class godfather_search(_PluginBase):
     # ---------------- 插件元信息 ----------------
     plugin_name = "教父资源转存"
-    plugin_desc = "输入「片名？」在聊天框展示带序号的媒体列表；回复序号（如 7）才转存对应资源到115网盘，不再自动下载第一个。"
+    plugin_desc = "三级交互：片名？→影视列表(电影/各季分开)→回复影视序号看资源列表(可翻页)→回复资源序号才转存115网盘。"
     plugin_icon = "godfather.png"
-    plugin_version = "3.4.0"
+    plugin_version = "3.5.0"
     plugin_author = "WorkBuddy"
     author_url = "https://github.com"
     plugin_config_prefix = "godfather_search_"
@@ -66,7 +67,11 @@ class godfather_search(_PluginBase):
 
         self._site_client: Optional[GodfatherClient] = None
         self._pan115: Optional[Pan115Client] = None
-        # 用户会话缓存：{userid: {'resources': [...], 'keyword': str, 'timestamp': float}}
+        # 每页展示条数（资源列表分页用）
+        self._page_size = 8
+        # 用户会话缓存（两级状态机，30 分钟过期）：
+        #   stage=media  ：{'stage','keyword','media_list','timestamp'}
+        #   stage=resource：{'stage','keyword','media','resources','page','timestamp'}
         self._cache: Dict[str, Dict[str, Any]] = {}
 
     # ---------------- 生命周期 ----------------
@@ -146,7 +151,7 @@ class godfather_search(_PluginBase):
                                 "component": "VAlert",
                                 "props": {
                                     "type": "info", "variant": "tonal",
-                                    "text": "两步操作：① 发送「影片名？」在聊天框展示带序号的媒体列表（不会自动下载）；② 回复序号（如 7，带不带问号均可）才把对应资源转存到115网盘。请填写教父站账号密码（会自动登录，也兼容 Cookie）与115 Cookie。",
+                                    "text": "三步操作：① 发「片名？」展示影视列表（电影/各季分开）；② 回复影视序号看该影视的资源列表（每页8条，发「下一页/上一页」翻页，「返回」换影视）；③ 回复资源序号（如 7，带不带问号均可）才转存115网盘。不会自动下载。请填教父站账号密码（自动登录，兼容 Cookie）与115 Cookie。",
                                 },
                             }],
                         }],
@@ -385,106 +390,203 @@ class godfather_search(_PluginBase):
         if not clean:
             return
 
-        # ① 纯数字：选择上一条结果中的某个资源（带不带问号均可，如截图中的「7」）
-        #    仅当该用户确有缓存结果时才吞掉这条消息，避免误判普通数字聊天
-        if clean.isdigit() and userid in self._cache:
-            self._handle_pick(int(clean), channel, userid)
+        cache = self._cache.get(userid)
+        if cache and time.time() - cache.get("timestamp", 0) > 1800:
+            self._cache.pop(userid, None)
+            cache = None
+
+        # ① 翻页指令：上一页 / 下一页（带不带问号均可），仅资源列表阶段有效
+        if clean in ("上一页", "下一页", "上页", "下页", "前一页", "后一页"):
+            if cache and cache.get("stage") == "resource":
+                delta = -1 if clean in ("上一页", "上页", "前一页") else 1
+                self._handle_page(delta, channel, userid)
+            else:
+                self.post_message(channel=channel, title="提示",
+                                  text="请先发送「片名？」并选择一部影视。", userid=userid)
             return
 
-        # ② 纯数字但没有缓存：提示先搜索（同样兼容无问号输入）
+        # ② 返回影视列表：input「返回 / 上一步 / 影视列表」
+        if clean in ("返回", "返回列表", "上一步", "影视列表", "重新选择"):
+            if cache and cache.get("stage") == "resource":
+                self._show_media_list(userid, channel, cache)
+            else:
+                self.post_message(channel=channel, title="提示",
+                                  text="请先发送「片名？」搜索影视。", userid=userid)
+            return
+
+        # ③ 纯数字：按当前阶段处理（选影视 / 选资源转存）
         if clean.isdigit():
-            self.post_message(channel=channel, title="提示",
-                              text="请先发送「片名？」搜索，再回复序号转存。", userid=userid)
+            if not cache:
+                self.post_message(channel=channel, title="提示",
+                                  text="请先发送「片名？」搜索，再回复序号。", userid=userid)
+                return
+            if cache.get("stage") == "media":
+                self._handle_select_media(int(clean), channel, userid)
+            else:
+                self._handle_pick(int(clean), channel, userid)
             return
 
-        # ③ 关键词搜索：以配置的问号结尾（同时兼容英文 ?）
+        # ④ 关键词搜索：以配置的问号结尾（同时兼容英文 ?）
         if not (text.endswith("？") or text.endswith("?")):
             return
         self._handle_search(clean, channel, userid)
 
     # ---------------- 核心流程 ----------------
-    def _handle_search(self, keyword: str, channel, userid):
-        self.post_message(channel=channel, title="教父搜索",
-                          text=f"🔍 正在搜索「{keyword}」...", userid=userid)
-
+    def _configure_ok(self, channel, userid) -> bool:
+        """公共前置校验：客户端与登录凭据。"""
         if not self._site_client:
             self.post_message(channel=channel, title="配置错误",
                               text="教父站客户端未初始化，请检查是否启用插件。", userid=userid)
-            return
+            return False
         if not (self._site_username and self._site_password) and not self._site_cookie:
             self.post_message(channel=channel, title="缺少登录凭据",
                               text="请先配置教父站账号和密码（或旧版 Cookie）再搜索。", userid=userid)
+            return False
+        return True
+
+    def _handle_search(self, keyword: str, channel, userid):
+        """第一级：模糊搜索 → 展示影视列表（电影 / 各季分开），不取资源。"""
+        self.post_message(channel=channel, title="教父搜索",
+                          text=f"🔍 正在搜索「{keyword}」的影视列表…", userid=userid)
+        if not self._configure_ok(channel, userid):
             return
 
-        resources, msg = self._site_client.search(keyword)
+        media_list, msg = self._site_client.search_media_list(keyword)
+        if not media_list:
+            self.post_message(channel=channel, title="无结果",
+                              text=f"❌ {msg}", userid=userid)
+            return
+
+        self._cache[userid] = {
+            "stage": "media", "keyword": keyword,
+            "media_list": media_list, "timestamp": time.time(),
+        }
+        lines = [
+            f"🎬 「{keyword}」影视列表（共 {len(media_list)} 部）：", "",
+        ]
+        for i, m in enumerate(media_list, 1):
+            title = m.get("title") or "未命名影视"
+            name, year = identify_media(title, keyword).get("name"), None
+            yr = re.search(r"(?:19|20)\d{2}", title)
+            year = yr.group(0) if yr else ""
+            label = f"{name} ({year})" if (name and year) else title
+            lines.append(f"{i}. {label}")
+        lines += ["", "💡 回复影视序号查看其资源列表；如「1」；发「片名？」重新搜索。"]
+        self.post_message(channel=channel, title="影视列表",
+                          text="\n".join(lines), userid=userid)
+
+    def _show_media_list(self, userid, channel, cache: Dict):
+        """从资源阶段返回影视列表。"""
+        media_list = cache.get("media_list", [])
+        keyword = cache.get("keyword", "")
+        lines = [f"🎬 「{keyword}」影视列表（共 {len(media_list)} 部）：", ""]
+        for i, m in enumerate(media_list, 1):
+            title = m.get("title") or "未命名影视"
+            yr = re.search(r"(?:19|20)\d{2}", title)
+            year = yr.group(0) if yr else ""
+            label = f"{title} ({year})" if year else title
+            lines.append(f"{i}. {label}")
+        lines += ["", "💡 回复影视序号查看其资源列表。"]
+        self.post_message(channel=channel, title="影视列表",
+                          text="\n".join(lines), userid=userid)
+
+    def _handle_select_media(self, number: int, channel, userid):
+        """第二级：按影视序号 → 精确取该影视资源 → 展示第 1 页。"""
+        cache = self._cache.get(userid, {})
+        media_list = cache.get("media_list", [])
+        if not (1 <= number <= len(media_list)):
+            self.post_message(channel=channel, title="序号错误",
+                              text=f"请输入 1-{len(media_list)} 之间的影视序号。", userid=userid)
+            return
+        media = media_list[number - 1]
+        title = media.get("title") or cache.get("keyword", "影视")
+        self.post_message(channel=channel, title="精确搜索",
+                          text=f"🔍 正在获取「{title}」的资源…", userid=userid)
+        if not self._configure_ok(channel, userid):
+            return
+
+        resources, msg = self._site_client.search_media_resources(media.get("path", ""))
         if not resources:
             self.post_message(channel=channel, title="无结果",
                               text=f"❌ {msg}", userid=userid)
             return
 
-        # 排序后截取展示列表，并按展示序号缓存（保证「展示序号 == 转存序号」）
         ranked = sort_resources(resources, self._quality_weight, self._seeders_weight)
-        top = ranked[:self._max_results]
         self._cache[userid] = {
-            "keyword": keyword, "resources": top, "items": top,
-            "timestamp": time.time(),
+            "stage": "resource", "keyword": cache.get("keyword", ""),
+            "media": media, "title": title,
+            "resources": ranked, "page": 1, "timestamp": time.time(),
         }
-
-        lines = self._format_media_list(keyword, top, len(resources))
-
-        if not self._pan115 or not self._115_cookie:
-            lines += ["", "⚠️ 未配置 115 Cookie，回复序号仅展示资源链接，无法转存。"]
-        else:
-            lines += ["", f"💡 回复序号（1-{len(top)}，如 7；带不带问号均可）转存对应资源。"]
-
-        self.post_message(channel=channel, title="媒体列表",
+        lines = self._format_resource_page(userid)
+        self.post_message(channel=channel, title=f"资源列表 · {title[:24]}",
                           text="\n".join(lines), userid=userid)
 
-    def _format_media_list(self, keyword: str, top: List[Dict], total: int) -> List[str]:
-        """把排序后的资源格式化成带序号的媒体列表（不触发任何转存）。"""
-        lines = [f"🎬 「{keyword}」媒体列表（共 {total} 条，展示前 {len(top)}）：", ""]
-        for i, r in enumerate(top, 1):
-            media = identify_media(r.get("title", ""), keyword)
-            name = media.get("name") or keyword
-            year = media.get("year") or ""
-            title = f"{name} ({year})" if year else name
-            if media.get("media_type") == "tv":
-                typ = "电视剧"
-                if media.get("season"):
-                    typ += f" S{int(media['season']):02d}"
-            else:
-                typ = "电影"
+    def _format_resource_page(self, userid: str) -> List[str]:
+        """按当前页把资源格式化为带【全局序号】的列表（不触发转存）。"""
+        cache = self._cache[userid]
+        resources = cache["resources"]
+        page = cache.get("page", 1)
+        total = len(resources)
+        page_size = self._page_size
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * page_size
+        end = min(start + page_size, total)
+
+        title = cache.get("title") or cache.get("keyword", "")
+        lines = [
+            f"🎬 「{title}」资源列表（共 {total} 条，第 {page}/{total_pages} 页）：", "",
+        ]
+        for idx in range(start, end):
+            r = resources[idx]
+            num = idx + 1  # 全局序号
             if r["type"] == "115":
                 src = f"💾115 {r.get('quality_label') or ''}"
                 extra = f"🔑 {r.get('receive_code') or '无码'}"
             else:
                 src = f"🧲磁力 {r.get('quality_label') or ''} 做种{r.get('seeders', 0)}"
                 extra = f"📦 {r.get('size') or '-'}"
-            lines.append(f"{i}. {title} · {typ}")
-            lines.append(f"   {src}  {extra}")
+            lines.append(f"【{num}】{src}")
+            lines.append(f"     {extra}  {r.get('title', '')[:30]}")
+        lines += ["", f"💡 回复【序号】转存；「上一页/下一页」翻页（当前 {page}/{total_pages}）；「返回」换影视。"]
         return lines
 
-    def _handle_pick(self, number: int, channel, userid):
+    def _handle_page(self, delta: int, channel, userid):
+        """资源列表翻页。"""
         cache = self._cache.get(userid)
-        if not cache or time.time() - cache["timestamp"] > 1800:
+        if not cache or cache.get("stage") != "resource":
             self.post_message(channel=channel, title="提示",
-                              text="结果已过期，请重新搜索。", userid=userid)
+                              text="请先选择一部影视。", userid=userid)
             return
-        # 使用展示时缓存的同一份列表，保证「看到的序号 == 转存的资源」
-        items = cache.get("items") or sort_resources(
-            cache["resources"], self._quality_weight, self._seeders_weight
-        )[:self._max_results]
-        if not (1 <= number <= len(items)):
-            self.post_message(channel=channel, title="编号错误",
-                              text=f"请输入 1-{len(items)} 之间的序号。", userid=userid)
+        resources = cache.get("resources", [])
+        total_pages = max(1, (len(resources) + self._page_size - 1) // self._page_size)
+        new_page = max(1, min(cache.get("page", 1) + delta, total_pages))
+        cache["page"] = new_page
+        cache["timestamp"] = time.time()
+        lines = self._format_resource_page(userid)
+        self.post_message(channel=channel, title="资源列表（翻页）",
+                          text="\n".join(lines), userid=userid)
+
+    def _handle_pick(self, number: int, channel, userid):
+        """第三级：按全局序号转存资源。"""
+        cache = self._cache.get(userid)
+        if not cache or cache.get("stage") != "resource":
+            self.post_message(channel=channel, title="提示",
+                              text="请先发送「片名？」并选择影视。", userid=userid)
             return
-        resource = items[number - 1]
+        resources = cache.get("resources", [])
+        if not (1 <= number <= len(resources)):
+            self.post_message(channel=channel, title="序号错误",
+                              text=f"请输入 1-{len(resources)} 之间的序号。", userid=userid)
+            return
+        resource = resources[number - 1]
+        kw = cache.get("title") or cache.get("keyword", "")
         if not self._pan115 or not self._115_cookie:
             self.post_message(channel=channel, title="资源链接",
                               text=f"💾 {resource['title']}\n🔗 {resource['url']}\n\n配置 115 Cookie 后可自动转存。",
                               userid=userid)
             return
-        result = self._execute(resource, channel, userid, cache.get("keyword", ""))
+        result = self._execute(resource, channel, userid, kw)
         self.post_message(channel=channel, title="转存结果", text=result, userid=userid)
 
     def _decide_plan(self, ranked: List[Dict]) -> Dict:

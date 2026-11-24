@@ -23,6 +23,7 @@
   - PoW 用真实浏览器环境自动计算，属于正常客户端行为。
 """
 import os
+import re
 import time
 import threading
 import contextlib
@@ -156,6 +157,180 @@ class GodfatherClient:
         if not resources:
             return [], "搜索完成但未解析到资源（关键词无结果、未登录或页面结构变化）"
         return resources, f"解析到 {len(resources)} 条资源"
+
+    # -------------------------------------------------- 两级搜索（影视列表 → 精确资源）
+    def _open_logged_page(self, p):
+        """启动浏览器 → 过首页 PoW → 登录，返回 (browser, ctx, page, err)。
+        调用方负责在 finally 里 close(browser)。供两级搜索复用，不影响原 search()。"""
+        browser, launch_err = self._launch_browser(p)
+        if not browser:
+            return None, None, None, launch_err
+        ctx = browser.new_context(user_agent=self.UA, locale="zh-CN",
+                                  viewport={"width": 1280, "height": 900})
+        page = ctx.new_page()
+        try:
+            self._goto(page, self.base_url, wait_until="domcontentloaded",
+                       timeout=self.timeout)
+            self._wait_pow(page)
+            if self.username and self.password:
+                ok, msg = self._browser_login(page, ctx)
+                if not ok:
+                    browser.close()
+                    return None, None, None, msg
+            elif self.cookie:
+                ck = {k: v for k, v in self._cookie_dict().items()
+                      if k.lower() not in {"browser_verified", "phpsessid"}}
+                for domain in (".xn--wcv59z.com", "www.xn--wcv59z.com"):
+                    try:
+                        ctx.add_cookies([
+                            {"name": k, "value": v, "domain": domain, "path": "/"}
+                            for k, v in ck.items()
+                        ])
+                    except Exception:
+                        pass
+        except Exception as e:
+            browser.close()
+            return None, None, None, f"初始化浏览器失败: {str(e)[:120]}"
+        return browser, ctx, page, ""
+
+    def _save_context_cookie(self, ctx):
+        """保存刷新后的登录态 Cookie，便于后续复用。"""
+        try:
+            self.cookie = "; ".join(f"{c['name']}={c['value']}" for c in ctx.cookies())
+            self.session.headers.update({"Cookie": self.cookie})
+        except Exception:
+            pass
+
+    def search_media_list(self, keyword: str) -> Tuple[List[Dict], str]:
+        """第一级：模糊搜索，返回影视卡片列表（每个卡片=一部影视，含详情路径与标题）。"""
+        if not keyword:
+            return [], "关键词为空"
+        if not self.use_browser:
+            return [], "请开启「浏览器验证」选项"
+        with _browser_guard():
+            return self._search_media_list_by_browser(keyword)
+
+    def _search_media_list_by_browser(self, keyword: str) -> Tuple[List[Dict], str]:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return [], "缺少 playwright 依赖，请安装后重试"
+        cards: List[Dict] = []
+        try:
+            with sync_playwright() as p:
+                browser, ctx, page, err = self._open_logged_page(p)
+                if not browser:
+                    return [], err
+                try:
+                    search_url = f"{self.base_url}/search?q={quote(keyword)}"
+                    self._goto(page, search_url, wait_until="domcontentloaded",
+                               timeout=self.timeout)
+                    self._wait_pow(page)
+                    page.wait_for_timeout(3000)
+                    cards = self._extract_media_cards(page)
+                    self._save_context_cookie(ctx)
+                finally:
+                    browser.close()
+        except Exception as e:
+            return [], f"搜索影视列表失败: {str(e)[:150]}"
+        if not cards:
+            return [], "搜索页未找到影视卡片（关键词无结果或页面结构变化）"
+        return cards, ""
+
+    def _extract_media_cards(self, page) -> List[Dict]:
+        """从搜索页提取影视卡片：按详情路径去重，标题取同一路径下信息量最大的文本。"""
+        best: Dict[str, str] = {}
+        order: List[str] = []
+        try:
+            links = page.locator("a[href]").all()
+        except Exception:
+            links = []
+        for a in links:
+            try:
+                href = (a.get_attribute("href") or "").strip()
+            except Exception:
+                continue
+            if not (href.startswith("/mv/") or href.startswith("/tv/")):
+                continue
+            title = ""
+            try:
+                title = (a.inner_text() or "").strip()
+            except Exception:
+                pass
+            if not title:
+                try:
+                    title = (a.get_attribute("title") or "").strip()
+                except Exception:
+                    pass
+            if not title:
+                try:
+                    for img in a.locator("img").all()[:1]:
+                        title = (img.get_attribute("alt") or "").strip()
+                except Exception:
+                    pass
+            title = re.sub(r"\s+", " ", title).strip()[:100]
+            if href not in best:
+                best[href] = ""
+                order.append(href)
+            if len(title) > len(best[href]):
+                best[href] = title
+        return [
+            {"path": href, "title": best[href] or href.rsplit("/", 1)[-1]}
+            for href in order
+        ]
+
+    def search_media_resources(self, media_path: str) -> Tuple[List[Dict], str]:
+        """第二级：按影视详情路径精确取该影视的全部资源。"""
+        if not media_path:
+            return [], "影视路径为空"
+        if not self.use_browser:
+            return [], "请开启「浏览器验证」选项"
+        with _browser_guard():
+            return self._resources_by_path(media_path)
+
+    def _resources_by_path(self, path: str) -> Tuple[List[Dict], str]:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return [], "缺少 playwright 依赖，请安装后重试"
+        found: List[Dict] = []
+        seen: set = set()
+        try:
+            with sync_playwright() as p:
+                browser, ctx, page, err = self._open_logged_page(p)
+                if not browser:
+                    return [], err
+                try:
+                    self._goto(page, urljoin(self.base_url, path),
+                               wait_until="domcontentloaded", timeout=self.timeout)
+                    self._wait_pow(page)
+                    page.wait_for_timeout(2000)
+                    api = f"/res/downurl/{path.strip('/')}"
+                    raw = page.evaluate(
+                        """async (u) => {
+                            try {
+                                const r = await fetch(u, {credentials:'include'});
+                                return await r.text();
+                            } catch(e) { return ''; }
+                        }""",
+                        api,
+                    )
+                    items = parse_downlist_json(raw)
+                    if not items:
+                        items = parse_resources(page.content() or "", self.base_url)
+                    for it in items:
+                        h = it.get("infohash") or it.get("url")
+                        if h and h not in seen:
+                            seen.add(h)
+                            found.append(it)
+                    self._save_context_cookie(ctx)
+                finally:
+                    browser.close()
+        except Exception as e:
+            return [], f"读取影视资源失败: {str(e)[:150]}"
+        if not found:
+            return [], "该影视未解析到资源（详情接口结构可能变化）"
+        return sort_resources(found), ""
 
     # -------------------------------------------------- 浏览器登录
     def _browser_login(self, page, ctx) -> Tuple[bool, str]:
