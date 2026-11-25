@@ -2,13 +2,16 @@
 教父资源转存插件（MoviePilot V2）。
 
 三级交互（电影/多季分开选，资源列表分页，不自动下载）：
-  1. 发送「影片名？」→ 自动登录教父站，模糊搜索并在聊天框展示【影视列表】
+  1. 发送「影片名?」→ 自动登录教父站，模糊搜索并展示【影视列表】
      （电影、第一季、第二季… 各自独立，带序号）；
-  2. 回复「选N」（如 选2）→ 精确搜索该影视详情页的全部资源，展示【资源列表】
-     （带全局序号，每页 8 条，可「上一页/下一页」翻页，「返回」换影视）；
-  3. 回复「取N」（如 取7）→ 才把对应资源转存到 115 网盘。
-  说明：MoviePilot 主程序会把「纯数字」当作洗版/资源选择序号抢先消费，
-  故统一改用「选N / 取N」带前缀指令（同时兼容纯数字，若渠道未拦截）。
+  2. 回复「选N?」（如 选2?）→ 精确搜索该影视详情页的全部资源，展示【资源列表】
+     （带全局序号，每页 8 条，可「下一页?/上一页?」翻页，「返回?」换影视）；
+  3. 回复「取N?」（如 取7?）→ 才把对应资源转存到 115 网盘；
+     支持一次多选：「取1,3,5?」或「取1-5?」批量转存。
+
+  ⚠️关键（智能机器人/AI 模式）：主程序 AI 只把「带问号 ?/？」的消息派发给插件，
+  不带问号的指令（如「选2」「2」）会被 AI 自己当成搜索词或洗版序号抢答，插件收不到。
+  因此本插件所有交互指令务必以问号结尾：选2? / 取7? / 下一页? / 返回?。
 
 合规说明：所有登录凭据（账号密码/Cookie）由用户自行提供，插件不破解鉴权、不撞库。
 """
@@ -30,9 +33,9 @@ from .media_identifier import identify_media, build_classify_path
 class godfather_search(_PluginBase):
     # ---------------- 插件元信息 ----------------
     plugin_name = "教父资源转存"
-    plugin_desc = "三级交互：片名？→影视列表→回复【选N】看资源列表(可翻页)→回复【取N】才转存115网盘。请务必用「选N/取N」，勿只发纯数字(会被主程序当作洗版序号拦截)。"
+    plugin_desc = "三级交互：片名?→影视列表→回复【选N?】看资源→回复【取N?】转存115(支持取1,3,5?多选)。⚠️所有指令务必带问号?，否则被AI抢答。"
     plugin_icon = "godfather.png"
-    plugin_version = "1.5.4"
+    plugin_version = "1.5.5"
     plugin_author = "WorkBuddy"
     author_url = "https://github.com"
     plugin_config_prefix = "godfather_search_"
@@ -146,7 +149,7 @@ class godfather_search(_PluginBase):
                                 "component": "VAlert",
                                 "props": {
                                     "type": "info", "variant": "tonal",
-                                    "text": "三步操作：① 发「片名？」展示影视列表；② 回复【选N】（如 选2）看该影视资源列表（每页8条，发「下一页/上一页」翻页，「返回」换影视）；③ 回复【取N】（如 取7）才转存115网盘。⚠️请务必加「选/取」前缀：只发纯数字会被 MoviePilot 主程序当成洗版/订阅序号抢先拦截，插件收不到。不会自动下载。请填教父站账号密码与115 Cookie。",
+                                    "text": "三步操作（每条指令都要带问号?）：① 发「片名?」展示影视列表；② 回复【选N?】（如 选2?）看该影视资源列表（每页8条，发「下一页?/上一页?」翻页，「返回?」换影视）；③ 回复【取N?】（如 取7?）转存115网盘，支持一次多选：取1,3,5? 或 取1-5?。⚠️关键：智能机器人(AI)模式只把带问号的消息转给插件，不带问号(如 选2、2)会被AI当搜索词/洗版序号抢答，插件收不到。不会自动下载。请填教父站账号密码与115 Cookie。",
                                 },
                             }],
                         }],
@@ -381,6 +384,12 @@ class godfather_search(_PluginBase):
         userid = event_data.get("userid")
         channel = event_data.get("channel")
 
+        # ⚠️智能机器人(AI)模式：主程序只把「带问号」的消息派发给插件；不带问号的
+        #（裸数字、裸「选2」）会被 AI 自己当搜索词/洗版序号抢答，插件根本收不到。
+        # 所以本插件所有指令都必须带 ?/？ 结尾才处理，避免与主程序抢答冲突。
+        has_q = text.endswith("？") or text.endswith("?")
+        if not has_q:
+            return
         clean = text.rstrip("？?").strip()
         if not clean:
             return
@@ -390,44 +399,42 @@ class godfather_search(_PluginBase):
             self._cache.pop(userid, None)
             cache = None
 
-        # ① 翻页指令：上一页 / 下一页（带不带问号均可），仅资源列表阶段有效
+        # ① 翻页指令：上一页 / 下一页（须带问号），仅资源列表阶段有效
         if clean in ("上一页", "下一页", "上页", "下页", "前一页", "后一页"):
             if cache and cache.get("stage") == "resource":
                 delta = -1 if clean in ("上一页", "上页", "前一页") else 1
                 self._handle_page(delta, channel, userid)
             else:
                 self.post_message(channel=channel, title="提示",
-                                  text="请先发送「片名？」并选择一部影视。", userid=userid)
+                                  text="请先发送「片名?」并选择一部影视。", userid=userid)
             return
 
-        # ② 返回影视列表：input「返回 / 上一步 / 影视列表」
+        # ② 返回影视列表：「返回? / 上一步? / 影视列表?」
         if clean in ("返回", "返回列表", "上一步", "影视列表", "重新选择"):
             if cache and cache.get("stage") == "resource":
                 self._show_media_list(userid, channel, cache)
             else:
                 self.post_message(channel=channel, title="提示",
-                                  text="请先发送「片名？」搜索影视。", userid=userid)
+                                  text="请先发送「片名?」搜索影视。", userid=userid)
             return
 
-        # ③ 序号指令：支持「选N / 取N / #N / 第N」，并兼容纯数字。
-        # 重要：MoviePilot 主程序会把「纯数字」当成自己的洗版/资源选择序号抢先消费
-        #（表现为回复「媒体库中已存在…洗版 XXX」，插件收不到消息）。带前缀的指令
-        # 主程序不认，会正常派发给本插件，因此提示语统一引导用户发「选N/取N」。
-        seq = self._parse_index(clean)
-        if seq is not None:
+        # ③ 序号指令（须带问号）：选N? 选影视，取N? 转存资源。
+        # 支持中文数字、多个序号（取1,3,5? / 取1-5?）、#N? / 第N?，兼容纯数字?。
+        seqs = self._parse_indices(clean)
+        if seqs:
             if not cache:
                 self.post_message(channel=channel, title="提示",
-                                  text="请先发送「片名？」搜索，再回复「选N」。", userid=userid)
+                                  text="请先发送「片名?」搜索，再回复「选N?」。", userid=userid)
                 return
             if cache.get("stage") == "media":
-                self._handle_select_media(seq, channel, userid)
+                # 选影视阶段：只取第一个序号（一次看一部的资源）
+                self._handle_select_media(seqs[0], channel, userid)
             else:
-                self._handle_pick(seq, channel, userid)
+                # 资源阶段：支持一次多选多个序号批量转存
+                self._handle_pick(seqs, channel, userid)
             return
 
-        # ④ 关键词搜索：以配置的问号结尾（同时兼容英文 ?）
-        if not (text.endswith("？") or text.endswith("?")):
-            return
+        # ④ 关键词搜索：带问号的片名
         self._handle_search(clean, channel, userid)
 
     # ---------------- 核心流程 ----------------
@@ -443,12 +450,68 @@ class godfather_search(_PluginBase):
             return False
         return True
 
-    @staticmethod
-    def _parse_index(text: str) -> Optional[int]:
-        """从消息里解析序号。支持「选N/取N/#N/第N」及纯数字，兼容「选 2 部」等写法。
-        带前缀是为绕开 MoviePilot 主程序对纯数字洗版序号的抢先消费。"""
-        m = re.fullmatch(r"(?:选|取|#|＃|第)?\s*(\d{1,3})\s*(?:部|个|条)?", text or "")
-        return int(m.group(1)) if m else None
+    _CN_NUM = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+               "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+    @classmethod
+    def _cn_to_int(cls, s: str) -> Optional[int]:
+        """中文数字转 int，支持到 99（如 二/十二/二十一）。失败返回 None。"""
+        s = (s or "").strip()
+        if not s:
+            return None
+        if s.isdigit():
+            return int(s)
+        if "十" in s:
+            left, _, right = s.partition("十")
+            tens = cls._CN_NUM.get(left, 1) if left else 1
+            ones = cls._CN_NUM.get(right, 0) if right else 0
+            return tens * 10 + ones
+        if all(c in cls._CN_NUM for c in s):
+            n = 0
+            for c in s:
+                n = n * 10 + cls._CN_NUM[c]
+            return n
+        return None
+
+    @classmethod
+    def _parse_indices(cls, text: str) -> List[int]:
+        """解析序号列表，须已去掉问号。支持：
+          - 单序号：选2 / 2 / 取7 / #3 / 第1 / 选二 / 取十二
+          - 多个：取1,3,5 / 取 1 3 5 / 取1、3、5
+          - 范围：取1-5 / 取2到6 / 取3~5
+        返回去重保序的序号列表；无法识别返回空列表。"""
+        s = (text or "").strip()
+        # 去掉前缀动词/符号与尾随量词
+        s = re.sub(r"^(?:选|取|选择|下载|转存|要|来|给|#|＃|第)\s*", "", s)
+        s = re.sub(r"\s*(?:部|个|条|张|个资源|部影视)$", "", s).strip()
+        if not s:
+            return []
+
+        result: List[int] = []
+        # 先按逗号/空格/顿号切块（范围块里可能含 - ~ 到）
+        for part in re.split(r"[,，、\s]+", s):
+            part = part.strip()
+            if not part:
+                continue
+            # 范围：1-5 / 2到6 / 3~6 / 二到五
+            m = re.fullmatch(r"(.+?)\s*(?:-|~|－|—|到|至)\s*(.+)", part)
+            if m:
+                a = cls._cn_to_int(m.group(1))
+                b = cls._cn_to_int(m.group(2))
+                if a is not None and b is not None and a <= b and (b - a) <= 100:
+                    result.extend(range(a, b + 1))
+                    continue
+            n = cls._cn_to_int(part)
+            if n is not None and n > 0:
+                result.append(n)
+        # 去重保序
+        seen = set()
+        uniq = []
+        for n in result:
+            if n not in seen:
+                seen.add(n)
+                uniq.append(n)
+        return uniq
 
     @staticmethod
     def _media_card_label(title: str) -> str:
@@ -481,7 +544,7 @@ class godfather_search(_PluginBase):
         for i, m in enumerate(media_list, 1):
             # 直接展示站点卡片真实标题，不用搜索关键词覆盖片名
             lines.append(f"{i}. {self._media_card_label(m.get('title'))}")
-        lines += ["", "💡 回复「选N」查看其资源列表，如「选2」；发「片名？」重新搜索。⚠️请勿只发纯数字，会被主程序当作洗版序号拦截。"]
+        lines += ["", "💡 回复「选N?」查看其资源列表，如「选2?」（记得带问号）；发「片名?」重新搜索。"]
         self.post_message(channel=channel, title="影视列表",
                           text="\n".join(lines), userid=userid)
 
@@ -492,7 +555,7 @@ class godfather_search(_PluginBase):
         lines = [f"🎬 「{keyword}」影视列表（共 {len(media_list)} 部）：", ""]
         for i, m in enumerate(media_list, 1):
             lines.append(f"{i}. {self._media_card_label(m.get('title'))}")
-        lines += ["", "💡 回复「选N」查看其资源列表，如「选2」。"]
+        lines += ["", "💡 回复「选N?」查看其资源列表，如「选2?」。"]
         self.post_message(channel=channel, title="影视列表",
                           text="\n".join(lines), userid=userid)
 
@@ -554,7 +617,7 @@ class godfather_search(_PluginBase):
                 extra = f"📦 {r.get('size') or '-'}"
             lines.append(f"【{num}】{src}")
             lines.append(f"     {extra}  {r.get('title', '')[:30]}")
-        lines += ["", f"💡 回复「取N」转存，如「取7」；「上一页/下一页」翻页（当前 {page}/{total_pages}）；「返回」换影视。⚠️请勿只发纯数字。"]
+        lines += ["", f"💡 回复「取N?」转存，如「取7?」；一次多选「取1,3,5?」或「取1-5?」；「上一页?/下一页?」翻页（当前 {page}/{total_pages}）；「返回?」换影视。"]
         return lines
 
     def _handle_page(self, delta: int, channel, userid):
@@ -573,27 +636,53 @@ class godfather_search(_PluginBase):
         self.post_message(channel=channel, title="资源列表（翻页）",
                           text="\n".join(lines), userid=userid)
 
-    def _handle_pick(self, number: int, channel, userid):
-        """第三级：按全局序号转存资源。"""
+    def _handle_pick(self, numbers, channel, userid):
+        """第三级：按全局序号转存资源，支持一次传多个序号批量转存。"""
         cache = self._cache.get(userid)
         if not cache or cache.get("stage") != "resource":
             self.post_message(channel=channel, title="提示",
-                              text="请先发送「片名？」并选择影视。", userid=userid)
+                              text="请先发送「片名?」并选择影视。", userid=userid)
             return
         resources = cache.get("resources", [])
-        if not (1 <= number <= len(resources)):
+        if isinstance(numbers, int):
+            numbers = [numbers]
+        numbers = list(numbers)
+        # 校验序号：只保留合法的，记录越界的
+        total = len(resources)
+        valid = [n for n in numbers if 1 <= n <= total]
+        invalid = [n for n in numbers if not (1 <= n <= total)]
+        if not valid:
             self.post_message(channel=channel, title="序号错误",
-                              text=f"请输入 1-{len(resources)} 之间的序号。", userid=userid)
+                              text=f"请输入 1-{total} 之间的序号。", userid=userid)
             return
-        resource = resources[number - 1]
         kw = cache.get("title") or cache.get("keyword", "")
+
+        # 未配置 115 Cookie：只展示链接（多个逐条列出）
         if not self._pan115 or not self._115_cookie:
+            lines = []
+            for n in valid:
+                r = resources[n - 1]
+                lines.append(f"【{n}】💾 {r['title']}\n🔗 {r['url']}")
+            extra = f"\n\n⚠️ 序号 {','.join(map(str, invalid))} 超出范围已忽略。" if invalid else ""
             self.post_message(channel=channel, title="资源链接",
-                              text=f"💾 {resource['title']}\n🔗 {resource['url']}\n\n配置 115 Cookie 后可自动转存。",
+                              text="\n\n".join(lines) + extra + "\n\n配置 115 Cookie 后可自动转存。",
                               userid=userid)
             return
-        result = self._execute(resource, channel, userid, kw)
-        self.post_message(channel=channel, title="转存结果", text=result, userid=userid)
+
+        # 逐个转存，汇总结果
+        lines = []
+        ok_count = 0
+        for n in valid:
+            resource = resources[n - 1]
+            result = self._execute(resource, channel, userid, kw)
+            lines.append(f"【{n}】{result}")
+            if result.startswith("✅"):
+                ok_count += 1
+        head = f"批量转存 {len(valid)} 条，成功 {ok_count} 条：" if len(valid) > 1 else "转存结果："
+        if invalid:
+            head += f"\n⚠️ 序号 {','.join(map(str, invalid))} 超出 1-{total} 已忽略"
+        self.post_message(channel=channel, title="转存结果",
+                          text=head + "\n" + "\n\n".join(lines), userid=userid)
 
     def _decide_plan(self, ranked: List[Dict]) -> Dict:
         """决策：115 优先；否则取排序最高的磁力。"""
