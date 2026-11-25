@@ -35,6 +35,7 @@ from .godfather_client import GodfatherClient
 from .pan115_client import Pan115Client
 from .resource_parser import sort_resources
 from .media_identifier import identify_media, build_classify_path
+from .library_notifier import notify_library_success
 
 
 class godfather_search(_PluginBase):
@@ -42,7 +43,7 @@ class godfather_search(_PluginBase):
     plugin_name = "教父资源转存"
     plugin_desc = "三级交互：片名?→影视列表→回复【选N?】看资源→回复【取N?】转存115(支持取1,3,5?多选)。⚠️所有指令务必带问号?，否则被AI抢答。"
     plugin_icon = "godfather.png"
-    plugin_version = "3.5.5"
+    plugin_version = "3.5.6"
     plugin_author = "WorkBuddy"
     author_url = "https://github.com"
     plugin_config_prefix = "godfather_search_"
@@ -69,6 +70,9 @@ class godfather_search(_PluginBase):
         self._classify_root = "影视库"
         self._movie_dir = "电影"
         self._tv_dir = "电视剧"
+        # 转存成功后通知 MoviePilot「入库成功」（事件+整理入库通知+结束匹配订阅）
+        self._notify_library = True
+        self._notify_finish_sub = True
 
         self._site_client: Optional[GodfatherClient] = None
         self._pan115: Optional[Pan115Client] = None
@@ -98,6 +102,8 @@ class godfather_search(_PluginBase):
         self._classify_root = (config.get("classify_root") or "影视库").strip()
         self._movie_dir = (config.get("movie_dir") or "电影").strip()
         self._tv_dir = (config.get("tv_dir") or "电视剧").strip()
+        self._notify_library = bool(config.get("notify_library", True))
+        self._notify_finish_sub = bool(config.get("notify_finish_sub", True))
 
         self._site_client = None
         self._pan115 = None
@@ -353,6 +359,44 @@ class godfather_search(_PluginBase):
                             "content": [{
                                 "component": "VAlert",
                                 "props": {
+                                    "type": "info", "variant": "tonal",
+                                    "text": "入库通知：转存成功后通知 MoviePilot「入库成功」——广播原生 TransferComplete 事件(驱动刮削/媒体库刷新/历史记录) + 发「整理入库」通知 + 可选结束同名订阅。",
+                                },
+                            }],
+                        }],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [{
+                            "component": "VCol",
+                            "props": {"cols": 12, "md": 6},
+                            "content": [{
+                                "component": "VSwitch",
+                                "props": {
+                                    "model": "notify_library", "label": "转存成功后通知入库",
+                                    "hint": "广播入库事件并发送整理入库通知", "persistent-hint": True,
+                                },
+                            }],
+                        }, {
+                            "component": "VCol",
+                            "props": {"cols": 12, "md": 6},
+                            "content": [{
+                                "component": "VSwitch",
+                                "props": {
+                                    "model": "notify_finish_sub", "label": "同时结束同名订阅",
+                                    "hint": "入库后结束 MoviePilot 中同名订阅，避免重复下载", "persistent-hint": True,
+                                },
+                            }],
+                        }],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [{
+                            "component": "VCol",
+                            "props": {"cols": 12},
+                            "content": [{
+                                "component": "VAlert",
+                                "props": {
                                     "type": "warning", "variant": "tonal",
                                     "text": "合规提示：请确保你有权访问相关内容，并遵守所在地区法律法规及站点条款。插件仅自动化你本人账号的转存操作。",
                                 },
@@ -377,6 +421,8 @@ class godfather_search(_PluginBase):
             "classify_root": "影视库",
             "movie_dir": "电影",
             "tv_dir": "电视剧",
+            "notify_library": True,
+            "notify_finish_sub": True,
         }
 
     # ---------------- 消息监听 ----------------
@@ -720,9 +766,10 @@ class godfather_search(_PluginBase):
         target_cid = "0"
         classify_note = ""
         kw = keyword or self._cache.get(userid, {}).get("keyword", "")
+        # 无论是否开启分类都识别媒体，供转存成功后通知 MoviePilot 入库用
+        media = identify_media(resource.get("title", ""), kw)
+        rel = build_classify_path(media, self._classify_root, self._movie_dir, self._tv_dir)
         if self._auto_classify and self._pan115:
-            media = identify_media(resource.get("title", ""), kw)
-            rel = build_classify_path(media, self._classify_root, self._movie_dir, self._tv_dir)
             resolved = self._pan115.get_or_create_folder(rel, "0")
             if resolved:
                 target_cid = resolved
@@ -736,7 +783,23 @@ class godfather_search(_PluginBase):
         else:
             result = self._pan115.add_offline_task(resource["url"], target_cid)
 
-        icon = "✅" if result.get("state") else "❌"
+        success = bool(result.get("state"))
+        icon = "✅" if success else "❌"
+        # 转存成功 → 通知 MoviePilot「入库成功」（事件+整理入库通知+结束匹配订阅）
+        if success and getattr(self, "_notify_library", True):
+            try:
+                notify_library_success(
+                    self,
+                    title=str(media.get("title") or kw or "影视"),
+                    year=str(media.get("year") or ""),
+                    media_type=str(media.get("media_type") or ""),
+                    season=media.get("season"),
+                    target_path=rel if self._auto_classify else "",
+                    resource_title=resource.get("title", ""),
+                    finish_sub=getattr(self, "_notify_finish_sub", True),
+                )
+            except Exception as e:
+                logger.warning(f"入库通知失败（不影响转存）: {e}")
         return (
             f"{icon} {result['msg']}\n"
             f"📁 资源：{resource['title'][:50]}\n"
