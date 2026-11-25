@@ -370,7 +370,14 @@ class GodfatherClient:
                     items = parse_downlist_json(raw)
                     if not items:
                         items = parse_resources(page.content() or "", self.base_url)
+                    # k=2 的 /bt/短码 跳转页资源：展开短码页抓取真实磁力列表
+                    expanded: List[Dict] = []
                     for it in items:
+                        if it.get("type") == "bt":
+                            expanded.extend(self._expand_bt_page(page, it))
+                        else:
+                            expanded.append(it)
+                    for it in expanded:
                         h = it.get("infohash") or it.get("url")
                         if h and h not in seen:
                             seen.add(h)
@@ -383,6 +390,65 @@ class GodfatherClient:
         if not found:
             return [], "该影视未解析到资源（详情接口结构可能变化）"
         return sort_resources(found), ""
+
+    def _expand_bt_page(self, page, bt_item: Dict) -> List[Dict]:
+        """展开 k=2 的 /bt/短码 跳转页：抓取页面内全部真实磁力。
+        连载动漫（如黑色五叶草第二季）详情接口 m 为空、资源挂在 /bt/xxx 页面，
+        必须二次打开该页才能拿到 btih。失败则返回空列表，不影响其他资源。"""
+        url = bt_item.get("url", "")
+        if not url:
+            return []
+        out: List[Dict] = []
+        try:
+            self._goto(page, urljoin(self.base_url, url),
+                       wait_until="domcontentloaded", timeout=self.timeout)
+            self._wait_pow(page)
+            page.wait_for_timeout(1500)
+            out = parse_resources(page.content() or "", self.base_url)
+            # parse_resources 从「磁力下载」锚文本取标题，信息量低；
+            # 用 JS 按 infohash 精确匹配其所在资源行，提取真实大小/集数后缀
+            try:
+                meta = page.evaluate(
+                    """() => {
+                        const res = {};
+                        document.querySelectorAll('a[href^="magnet:"]').forEach(a => {
+                            const m = (a.getAttribute('href')||'').match(/btih:([0-9a-fA-F]{40})/i);
+                            if (!m) return;
+                            let row = a;
+                            for (let i=0;i<5 && row;i++) {
+                                row = row.parentElement;
+                                if (row && /大小[：:]/.test(row.innerText||'')) break;
+                            }
+                            const txt = row ? (row.innerText||'').replace(/\\s+/g,' ').trim() : '';
+                            const size = (txt.match(/大小[：:]\\s*([0-9.]+[TtGgMm][iI]?[Bb])/)||[])[1] || '';
+                            const ep = (txt.match(/(第?\\s*\\d{1,3}\\s*集|[Ee]\\d{2,3})/)||[])[1] || '';
+                            res[m[1].toLowerCase()] = {size, ep};
+                        });
+                        return res;
+                    }"""
+                )
+            except Exception:
+                meta = {}
+            base_title = bt_item.get("title", "")
+            # 只保留磁力条目；标题用父资源名 + 集数 + 大小，画质继承父条目
+            for r in out:
+                if r.get("type") != "magnet":
+                    continue
+                ih = (r.get("infohash") or "").lower()
+                info = meta.get(ih, {}) if meta else {}
+                parts = [base_title]
+                if info.get("ep"):
+                    parts.append(info["ep"])
+                r["title"] = " ".join(parts)[:90]
+                if info.get("size"):
+                    r["size"] = info["size"]
+                if not r.get("quality_label") and bt_item.get("quality_label"):
+                    r["quality_label"] = bt_item["quality_label"]
+                    r["quality"] = bt_item.get("quality", 0)
+            out = [r for r in out if r.get("type") == "magnet"]
+        except Exception:
+            return []
+        return out
 
     # -------------------------------------------------- 浏览器登录
     def _browser_login(self, page, ctx) -> Tuple[bool, str]:
@@ -625,6 +691,9 @@ class GodfatherClient:
                         if not items:
                             items = parse_resources(page.content() or "", self.base_url)
                         for it in items:
+                            # /bt/短码 跳转类型需二次展开，旧单阶段 search 不处理，跳过避免伪资源
+                            if it.get("type") == "bt":
+                                continue
                             h = it.get("infohash") or it.get("url")
                             if h and h not in seen_hash:
                                 seen_hash.add(h)

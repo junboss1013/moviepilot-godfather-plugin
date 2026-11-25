@@ -147,15 +147,38 @@ def parse_downlist_json(data: Any) -> List[Dict[str, Any]]:
     seeders = col("e")
     quals = col("p")
     times = col("n")
+    # k=2 类型为「/bt/短码」跳转页资源（连载动漫常见）：m 为空，真实磁力需展开短码页
+    links = col("u")
+    kinds = col("k")
     count = max(len(hashes), len(titles))
 
     results: List[Dict[str, Any]] = []
     seen: set = set()
     for i in range(count):
         h = str(hashes[i]).strip() if i < len(hashes) else ""
-        if not h:
-            continue
         title = str(titles[i]).strip() if i < len(titles) else ""
+        # 空 hash + u 短码（k=2）：记录为 bt 跳转类型，交客户端展开取真实磁力
+        if not h:
+            code = str(links[i]).strip() if i < len(links) else ""
+            kind = str(kinds[i]).strip() if i < len(kinds) else ""
+            if code and (kind == "2" or not kind):
+                bt_url = f"/bt/{code}"
+                if bt_url not in seen:
+                    seen.add(bt_url)
+                    q_score, q_label = parse_quality(title)
+                    results.append({
+                        "type": "bt",
+                        "url": bt_url,
+                        "short_code": code,
+                        "title": title or "未命名资源",
+                        "size": str(sizes[i]).strip() if i < len(sizes) else "",
+                        "quality": q_score,
+                        "quality_label": q_label,
+                        "seeders": 0,
+                        "infohash": "",
+                        "pub_time": str(times[i]).strip() if i < len(times) else "",
+                    })
+            continue
         qcode = str(quals[i]).strip() if i < len(quals) else ""
         # 画质：优先站点代码，其次标题文本
         q_score, q_label = _quality_from_code(qcode)
