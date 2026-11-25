@@ -4,9 +4,11 @@
 三级交互（电影/多季分开选，资源列表分页，不自动下载）：
   1. 发送「影片名？」→ 自动登录教父站，模糊搜索并在聊天框展示【影视列表】
      （电影、第一季、第二季… 各自独立，带序号）；
-  2. 回复影视序号 → 精确搜索该影视详情页的全部资源，展示【资源列表】
+  2. 回复「选N」（如 选2）→ 精确搜索该影视详情页的全部资源，展示【资源列表】
      （带全局序号，每页 8 条，可「上一页/下一页」翻页，「返回」换影视）；
-  3. 回复资源序号（带不带问号均可）→ 才把对应资源转存到 115 网盘。
+  3. 回复「取N」（如 取7）→ 才把对应资源转存到 115 网盘。
+  说明：MoviePilot 主程序会把「纯数字」当作洗版/资源选择序号抢先消费，
+  故统一改用「选N / 取N」带前缀指令（同时兼容纯数字，若渠道未拦截）。
 
 合规说明：所有登录凭据（账号密码/Cookie）由用户自行提供，插件不破解鉴权、不撞库。
 """
@@ -28,9 +30,9 @@ from .media_identifier import identify_media, build_classify_path
 class godfather_search(_PluginBase):
     # ---------------- 插件元信息 ----------------
     plugin_name = "教父资源转存"
-    plugin_desc = "三级交互：片名？→影视列表(电影/各季分开)→回复影视序号看资源列表(可翻页)→回复资源序号才转存115网盘。"
+    plugin_desc = "三级交互：片名？→影视列表→回复【选N】看资源列表(可翻页)→回复【取N】才转存115网盘。请务必用「选N/取N」，勿只发纯数字(会被主程序当作洗版序号拦截)。"
     plugin_icon = "godfather.png"
-    plugin_version = "1.5.3"
+    plugin_version = "1.5.4"
     plugin_author = "WorkBuddy"
     author_url = "https://github.com"
     plugin_config_prefix = "godfather_search_"
@@ -144,7 +146,7 @@ class godfather_search(_PluginBase):
                                 "component": "VAlert",
                                 "props": {
                                     "type": "info", "variant": "tonal",
-                                    "text": "三步操作：① 发「片名？」展示影视列表（电影/各季分开）；② 回复影视序号看该影视的资源列表（每页8条，发「下一页/上一页」翻页，「返回」换影视）；③ 回复资源序号（如 7，带不带问号均可）才转存115网盘。不会自动下载。请填教父站账号密码（自动登录，兼容 Cookie）与115 Cookie。",
+                                    "text": "三步操作：① 发「片名？」展示影视列表；② 回复【选N】（如 选2）看该影视资源列表（每页8条，发「下一页/上一页」翻页，「返回」换影视）；③ 回复【取N】（如 取7）才转存115网盘。⚠️请务必加「选/取」前缀：只发纯数字会被 MoviePilot 主程序当成洗版/订阅序号抢先拦截，插件收不到。不会自动下载。请填教父站账号密码与115 Cookie。",
                                 },
                             }],
                         }],
@@ -407,16 +409,20 @@ class godfather_search(_PluginBase):
                                   text="请先发送「片名？」搜索影视。", userid=userid)
             return
 
-        # ③ 纯数字：按当前阶段处理（选影视 / 选资源转存）
-        if clean.isdigit():
+        # ③ 序号指令：支持「选N / 取N / #N / 第N」，并兼容纯数字。
+        # 重要：MoviePilot 主程序会把「纯数字」当成自己的洗版/资源选择序号抢先消费
+        #（表现为回复「媒体库中已存在…洗版 XXX」，插件收不到消息）。带前缀的指令
+        # 主程序不认，会正常派发给本插件，因此提示语统一引导用户发「选N/取N」。
+        seq = self._parse_index(clean)
+        if seq is not None:
             if not cache:
                 self.post_message(channel=channel, title="提示",
-                                  text="请先发送「片名？」搜索，再回复序号。", userid=userid)
+                                  text="请先发送「片名？」搜索，再回复「选N」。", userid=userid)
                 return
             if cache.get("stage") == "media":
-                self._handle_select_media(int(clean), channel, userid)
+                self._handle_select_media(seq, channel, userid)
             else:
-                self._handle_pick(int(clean), channel, userid)
+                self._handle_pick(seq, channel, userid)
             return
 
         # ④ 关键词搜索：以配置的问号结尾（同时兼容英文 ?）
@@ -436,6 +442,13 @@ class godfather_search(_PluginBase):
                               text="请先配置教父站账号和密码（或旧版 Cookie）再搜索。", userid=userid)
             return False
         return True
+
+    @staticmethod
+    def _parse_index(text: str) -> Optional[int]:
+        """从消息里解析序号。支持「选N/取N/#N/第N」及纯数字，兼容「选 2 部」等写法。
+        带前缀是为绕开 MoviePilot 主程序对纯数字洗版序号的抢先消费。"""
+        m = re.fullmatch(r"(?:选|取|#|＃|第)?\s*(\d{1,3})\s*(?:部|个|条)?", text or "")
+        return int(m.group(1)) if m else None
 
     @staticmethod
     def _media_card_label(title: str) -> str:
@@ -468,7 +481,7 @@ class godfather_search(_PluginBase):
         for i, m in enumerate(media_list, 1):
             # 直接展示站点卡片真实标题，不用搜索关键词覆盖片名
             lines.append(f"{i}. {self._media_card_label(m.get('title'))}")
-        lines += ["", "💡 回复影视序号查看其资源列表；如「1」；发「片名？」重新搜索。"]
+        lines += ["", "💡 回复「选N」查看其资源列表，如「选2」；发「片名？」重新搜索。⚠️请勿只发纯数字，会被主程序当作洗版序号拦截。"]
         self.post_message(channel=channel, title="影视列表",
                           text="\n".join(lines), userid=userid)
 
@@ -479,7 +492,7 @@ class godfather_search(_PluginBase):
         lines = [f"🎬 「{keyword}」影视列表（共 {len(media_list)} 部）：", ""]
         for i, m in enumerate(media_list, 1):
             lines.append(f"{i}. {self._media_card_label(m.get('title'))}")
-        lines += ["", "💡 回复影视序号查看其资源列表。"]
+        lines += ["", "💡 回复「选N」查看其资源列表，如「选2」。"]
         self.post_message(channel=channel, title="影视列表",
                           text="\n".join(lines), userid=userid)
 
@@ -541,7 +554,7 @@ class godfather_search(_PluginBase):
                 extra = f"📦 {r.get('size') or '-'}"
             lines.append(f"【{num}】{src}")
             lines.append(f"     {extra}  {r.get('title', '')[:30]}")
-        lines += ["", f"💡 回复【序号】转存；「上一页/下一页」翻页（当前 {page}/{total_pages}）；「返回」换影视。"]
+        lines += ["", f"💡 回复「取N」转存，如「取7」；「上一页/下一页」翻页（当前 {page}/{total_pages}）；「返回」换影视。⚠️请勿只发纯数字。"]
         return lines
 
     def _handle_page(self, delta: int, channel, userid):
