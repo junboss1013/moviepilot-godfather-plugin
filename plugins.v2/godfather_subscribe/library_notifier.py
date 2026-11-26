@@ -223,7 +223,8 @@ def _finish_matched_subscribes(name: str, year: str = "", limit: int = 5) -> Lis
 def notify_library_success(plugin, *, title: str, year: str = "", media_type: str = "",
                            season: Optional[int] = None, target_path: str = "",
                            pickcode: str = "", resource_title: str = "",
-                           send_notice: bool = True, finish_sub: bool = True) -> Dict[str, Any]:
+                           send_notice: bool = True, finish_sub: bool = True,
+                           refresh_webhook: bool = True) -> Dict[str, Any]:
     """
     转存到 115 成功后统一通知 MoviePilot「入库成功」。
 
@@ -237,9 +238,10 @@ def notify_library_success(plugin, *, title: str, year: str = "", media_type: st
     :param resource_title: 转存的资源标题（通知正文展示）
     :param send_notice: 是否发「整理入库」通知
     :param finish_sub: 是否结束匹配的 MoviePilot 订阅
+    :param refresh_webhook: 是否触发 strm-gen webhook 刷新 Emby 媒体库
     :return: 各步骤结果字典
     """
-    result: Dict[str, Any] = {"transfer_event": False, "notice": False, "finished_subs": []}
+    result: Dict[str, Any] = {"transfer_event": False, "notice": False, "finished_subs": [], "webhook": False}
     result["transfer_event"] = _emit_transfer_complete(
         title=title, year=year, media_type=media_type, season=season,
         target_path=target_path, pickcode=pickcode)
@@ -258,4 +260,11 @@ def notify_library_success(plugin, *, title: str, year: str = "", media_type: st
             result["finished_subs"] = _finish_matched_subscribes(title, year)
         except Exception as e:
             _warn(f"结束匹配订阅失败: {e}")
+    # 触发 strm-gen webhook → Emby 媒体库立即刷新（独立于 MoviePilot 入库事件）
+    if refresh_webhook:
+        try:
+            from .refresh_webhook import trigger_refresh
+            result["webhook"] = trigger_refresh(plugin, path_hint=target_path or title)
+        except Exception as e:
+            _warn(f"触发刷新 webhook 失败: {e}")
     return result

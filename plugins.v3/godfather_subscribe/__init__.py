@@ -44,7 +44,7 @@ class godfather_subscribe(_PluginBase):
     plugin_name = "教父订阅转存"
     plugin_desc = "定时遍历MoviePilot订阅：教父站搜到就优先转存115，搜不到回退主程序。电影成功后结束订阅，电视剧按季去重继续追更。"
     plugin_icon = "godfather.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "WorkBuddy"
     author_url = "https://github.com"
     plugin_config_prefix = "godfather_subscribe_"
@@ -81,6 +81,9 @@ class godfather_subscribe(_PluginBase):
         self._tv_dir = "电视剧"
         # 转存成功后广播入库事件+发整理入库通知
         self._notify_library = True
+        # strm-gen webhook（转存成功后刷新 Emby 媒体库）
+        self._webhook_url = ""
+        self._webhook_token = ""
 
     # ---------------- 生命周期 ----------------
     def init_plugin(self, config: dict = None):
@@ -104,6 +107,8 @@ class godfather_subscribe(_PluginBase):
         self._movie_dir = (config.get("movie_dir") or "电影").strip()
         self._tv_dir = (config.get("tv_dir") or "电视剧").strip()
         self._notify_library = bool(config.get("notify_library", True))
+        self._webhook_url = (config.get("webhook_url") or "").strip()
+        self._webhook_token = (config.get("webhook_token") or "").strip()
         self._load_sub_progress()
 
         self._site_client = None
@@ -568,6 +573,32 @@ class godfather_subscribe(_PluginBase):
                     "component": "VRow",
                     "content": [{
                         "component": "VCol",
+                        "props": {"cols": 12, "md": 8},
+                        "content": [{
+                            "component": "VTextField",
+                            "props": {
+                                "model": "webhook_url", "label": "strm-gen 刷新地址",
+                                "placeholder": "http://192.168.1.10:5679/refresh", "clearable": True,
+                                "hint": "转存成功后 POST 此地址触发 Emby 媒体库立即刷新；留空则不刷新", "persistent-hint": True,
+                            },
+                        }],
+                    }, {
+                        "component": "VCol",
+                        "props": {"cols": 12, "md": 4},
+                        "content": [{
+                            "component": "VTextField",
+                            "props": {
+                                "model": "webhook_token", "label": "Webhook Token",
+                                "placeholder": "strmrefresh2026", "clearable": True,
+                                "hint": "需与 strm-gen 的 WEBHOOK_TOKEN 一致", "persistent-hint": True,
+                            },
+                        }],
+                    }],
+                },
+                {
+                    "component": "VRow",
+                    "content": [{
+                        "component": "VCol",
                         "props": {"cols": 12},
                         "content": [{
                             "component": "VAlert",
@@ -599,4 +630,6 @@ class godfather_subscribe(_PluginBase):
             "movie_dir": "电影",
             "tv_dir": "电视剧",
             "notify_library": True,
+            "webhook_url": "",
+            "webhook_token": "",
         }

@@ -36,7 +36,7 @@ class godfather_search(_PluginBase):
     plugin_name = "教父资源转存"
     plugin_desc = "三级交互：片名?→影视列表→回复【选N?】看资源→回复【取N?】转存115(支持取1,3,5?多选)。⚠️所有指令务必带问号?，否则被AI抢答。"
     plugin_icon = "godfather.png"
-    plugin_version = "1.5.6"
+    plugin_version = "1.5.7"
     plugin_author = "WorkBuddy"
     author_url = "https://github.com"
     plugin_config_prefix = "godfather_search_"
@@ -66,6 +66,9 @@ class godfather_search(_PluginBase):
         # 转存成功后通知 MoviePilot「入库成功」（事件+整理入库通知+结束匹配订阅）
         self._notify_library = True
         self._notify_finish_sub = True
+        # strm-gen webhook（转存成功后刷新 Emby 媒体库）
+        self._webhook_url = ""
+        self._webhook_token = ""
 
         self._site_client: Optional[GodfatherClient] = None
         self._pan115: Optional[Pan115Client] = None
@@ -97,6 +100,8 @@ class godfather_search(_PluginBase):
         self._tv_dir = (config.get("tv_dir") or "电视剧").strip()
         self._notify_library = bool(config.get("notify_library", True))
         self._notify_finish_sub = bool(config.get("notify_finish_sub", True))
+        self._webhook_url = (config.get("webhook_url") or "").strip()
+        self._webhook_token = (config.get("webhook_token") or "").strip()
 
         self._site_client = None
         self._pan115 = None
@@ -386,6 +391,32 @@ class godfather_search(_PluginBase):
                         "component": "VRow",
                         "content": [{
                             "component": "VCol",
+                            "props": {"cols": 12, "md": 8},
+                            "content": [{
+                                "component": "VTextField",
+                                "props": {
+                                    "model": "webhook_url", "label": "strm-gen 刷新地址",
+                                    "placeholder": "http://192.168.1.10:5679/refresh", "clearable": True,
+                                    "hint": "转存成功后 POST 此地址触发 Emby 媒体库立即刷新；留空则不刷新", "persistent-hint": True,
+                                },
+                            }],
+                        }, {
+                            "component": "VCol",
+                            "props": {"cols": 12, "md": 4},
+                            "content": [{
+                                "component": "VTextField",
+                                "props": {
+                                    "model": "webhook_token", "label": "Webhook Token",
+                                    "placeholder": "strmrefresh2026", "clearable": True,
+                                    "hint": "需与 strm-gen 的 WEBHOOK_TOKEN 一致", "persistent-hint": True,
+                                },
+                            }],
+                        }],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [{
+                            "component": "VCol",
                             "props": {"cols": 12},
                             "content": [{
                                 "component": "VAlert",
@@ -416,6 +447,8 @@ class godfather_search(_PluginBase):
             "tv_dir": "电视剧",
             "notify_library": True,
             "notify_finish_sub": True,
+            "webhook_url": "",
+            "webhook_token": "",
         }
 
     # ---------------- 消息监听 ----------------
