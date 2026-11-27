@@ -29,7 +29,7 @@ from .pan115_client import Pan115Client
 from .resource_parser import sort_resources
 from .media_identifier import identify_media, build_classify_path
 from . import subscribe_helper as subh
-from .library_notifier import notify_library_success
+from .refresh_webhook import trigger_refresh
 
 
 class godfather_subscribe(_PluginBase):
@@ -37,7 +37,7 @@ class godfather_subscribe(_PluginBase):
     plugin_name = "教父订阅转存"
     plugin_desc = "定时遍历MoviePilot订阅：教父站搜到就优先转存115，搜不到回退主程序。电影成功后结束订阅，电视剧按季去重继续追更。"
     plugin_icon = "godfather.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "WorkBuddy"
     author_url = "https://github.com"
     plugin_config_prefix = "godfather_subscribe_"
@@ -72,8 +72,6 @@ class godfather_subscribe(_PluginBase):
         self._classify_root = "影视库"
         self._movie_dir = "电影"
         self._tv_dir = "电视剧"
-        # 转存成功后广播入库事件+发整理入库通知
-        self._notify_library = True
         # strm-gen webhook（转存成功后刷新 Emby 媒体库）
         self._webhook_url = ""
         self._webhook_token = ""
@@ -99,7 +97,6 @@ class godfather_subscribe(_PluginBase):
         self._classify_root = (config.get("classify_root") or "影视库").strip()
         self._movie_dir = (config.get("movie_dir") or "电影").strip()
         self._tv_dir = (config.get("tv_dir") or "电视剧").strip()
-        self._notify_library = bool(config.get("notify_library", True))
         self._webhook_url = (config.get("webhook_url") or "").strip()
         self._webhook_token = (config.get("webhook_token") or "").strip()
         self._load_sub_progress()
@@ -304,33 +301,20 @@ class godfather_subscribe(_PluginBase):
             d_ok, d_msg = subh.finish_subscribe(int(sub["id"]))
             logger.info(f"教父订阅插件：「{name}」结束订阅 {d_msg}")
 
-        # 通知 MoviePilot「入库成功」：广播原生 TransferComplete 事件（驱动刮削/
-        # 媒体库刷新/历史记录）+ 发「整理入库」通知。订阅结束已在上面单独处理，
-        # 这里 finish_sub=False 避免重复删除。
-        if getattr(self, "_notify_library", True):
-            try:
-                notify_library_success(
-                    self,
-                    title=str(media.get("title") or name),
-                    year=str(media.get("year") or sub.get("year", "")),
-                    media_type=str(media.get("media_type") or sub.get("type", "")),
-                    season=media.get("season") or season,
-                    target_path=rel,
-                    resource_title=resource.get("title", ""),
-                    send_notice=True,
-                    finish_sub=False,
-                )
-            except Exception as e:
-                logger.warning(f"教父订阅插件：入库通知失败（不影响转存）: {e}")
-        else:
-            try:
-                self.post_message(
-                    title="教父订阅转存",
-                    text=(f"✅ 订阅「{name}」已由教父站优先转存115\n"
-                          f"📁 {rel}\n📦 {resource.get('title', '')[:50]}"),
-                )
-            except Exception:
-                pass
+        # 通知：转存成功提示
+        try:
+            self.post_message(
+                title="教父订阅转存",
+                text=(f"✅ 订阅「{name}」已由教父站优先转存115\n"
+                      f"📁 {rel}\n📦 {resource.get('title', '')[:50]}"),
+            )
+        except Exception:
+            pass
+        # 触发 strm-gen webhook 立即刷新 Emby 媒体库（防御式，失败不影响转存）
+        try:
+            trigger_refresh(self, path_hint=rel)
+        except Exception as e:
+            logger.warning(f"教父订阅插件：触发刷新 webhook 失败（不影响转存）: {e}")
         logger.info(f"教父订阅插件：「{name}」转存成功（{rel}）")
         return True
 
@@ -515,21 +499,6 @@ class godfather_subscribe(_PluginBase):
                     "component": "VRow",
                     "content": [{
                         "component": "VCol",
-                        "props": {"cols": 12},
-                        "content": [{
-                            "component": "VSwitch",
-                            "props": {
-                                "model": "notify_library", "label": "转存成功后通知 MoviePilot 入库",
-                                "hint": "广播原生 TransferComplete 事件(驱动刮削/媒体库刷新/历史记录)+发整理入库通知",
-                                "persistent-hint": True,
-                            },
-                        }],
-                    }],
-                },
-                {
-                    "component": "VRow",
-                    "content": [{
-                        "component": "VCol",
                         "props": {"cols": 12, "md": 4},
                         "content": [{
                             "component": "VTextField",
@@ -622,7 +591,6 @@ class godfather_subscribe(_PluginBase):
             "classify_root": "影视库",
             "movie_dir": "电影",
             "tv_dir": "电视剧",
-            "notify_library": True,
             "webhook_url": "",
             "webhook_token": "",
         }
